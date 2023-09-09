@@ -467,7 +467,7 @@ class ManageModel:
 		X, y = config.data_load.get_batch(epoch)
 		start = time.time()
 		with config.autocast:
-			pred, loss = self.model(X, y, epoch)
+			pred, loss = self.model(X, y)
 		self.optimizer.zero_grad(set_to_none=True)
 		loss.backward()
 		torch.nn.utils.clip_grad_norm_(
