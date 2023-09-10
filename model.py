@@ -131,118 +131,116 @@ class CausalSelfAttention(nn.Module):
 		y = self.resid_dropout(self.c_proj(y))
 		return y
 
+class CausalSelfAttention2(nn.Module):
+	def __init__(self, idx: int):
+		super().__init__()
+		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
+		self.idx = idx
+		self.dim = config.embeds_size
+		self.n_heads = config.num_heads
+		self.n_layers = config.num_layers
+		self.head_size = self.dim // self.n_heads
+		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
+		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
+		self.dropout = config.dropout
+		# self.attn_dropout = nn.Dropout(self.dropout)
+		self.resid_dropout = nn.Dropout(self.dropout)
+		# self.n_groups = 64
+		self.n_groups = int(config.block_size ** 0.5)
+		self.per_group = (config.block_size // self.n_groups)
+		self.odd_even = self.n_layers % 2
 
-# class CausalSelfAttention2(nn.Module):
-# 	def __init__(self, idx: int):
-# 		super().__init__()
-# 		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
-# 		self.idx = idx
-# 		self.dim = config.embeds_size
-# 		self.n_heads = config.num_heads
-# 		self.n_layers = config.num_layers
-# 		self.head_size = self.dim // self.n_heads
-# 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
-# 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
-# 		self.dropout = config.dropout
-# 		# self.attn_dropout = nn.Dropout(self.dropout)
-# 		self.resid_dropout = nn.Dropout(self.dropout)
-# 		# self.n_groups = 64
-# 		self.n_groups = int(config.block_size ** 0.5)
-# 		self.per_group = (config.block_size // self.n_groups)
-# 		self.odd_even = self.n_layers % 2
+		self.flash = config.flash_attention and hasattr(torch.nn.functional, 'scaled_dot_product_attention')
 
-# 		self.flash = config.flash_attention and hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-
-# 		self.register_buffer('bias', torch.tril(torch.ones(self.per_group + 1, self.per_group + 1))
-# 									.view(1, 1, 1, self.per_group + 1, self.per_group + 1))
-# 		self.register_buffer('bias2', torch.tril(torch.ones(self.n_groups, self.n_groups))
-# 									.view(1, 1, self.n_groups, self.n_groups))
-# 		self.register_buffer('bias3', torch.tril(torch.ones(self.per_group, self.per_group))
-# 									.view(1, 1, self.per_group, self.per_group))
-
-
-# 	def do_att(self, q, k, v, bias):
-# 		if self.flash:
-# 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-# 				attn_mask=None,
-# 				dropout_p=0,
-# 				is_causal=True,
-# 			)
-# 		else:
-# 			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-# 			att = att.masked_fill(bias == 0, float('-inf'))
-# 			att = F.softmax(att, dim=-1)
-# 			# att = self.attn_dropout(att) # Find a replacement for it.
-# 			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
-# 		return y
+		# self.register_buffer('bias', torch.tril(torch.ones(self.per_group + 1, self.per_group + 1))
+		# 							.view(1, 1, 1, self.per_group + 1, self.per_group + 1))
+		# self.register_buffer('bias2', torch.tril(torch.ones(self.n_groups, self.n_groups))
+		# 							.view(1, 1, self.n_groups, self.n_groups))
+		# self.register_buffer('bias3', torch.tril(torch.ones(self.per_group, self.per_group))
+		# 							.view(1, 1, self.per_group, self.per_group))
 
 
-# 	def forward(self, x):
-# 		B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+	def do_att(self, q, k, v, bias):
+		if self.flash:
+			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+				attn_mask=None,
+				dropout_p=0,
+				is_causal=True,
+			)
+		else:
+			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+			att = att.masked_fill(bias == 0, float('-inf'))
+			att = F.softmax(att, dim=-1)
+			# att = self.attn_dropout(att) # Find a replacement for it.
+			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
+		return y
 
-# 		# calculate query, key, values for all heads in batch and move head forward to be the batch dim
-# 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
-# 		odd_head = self.idx % 2
-# 		its_time = (self.odd_even ^ odd_head)
-# 		n_groups = self.n_groups
-# 		if self.idx == 0 and T % self.per_group != 0:
-# 			remain = self.per_group - (T % self.per_group)
-# 			comp = remain * self.dim
-# 			T = T + remain
-# 			pad = torch.zeros(B, remain, self.dim).to(x.device)
-# 			# Think about this during inference
-# 			q = torch.cat((q, pad), dim=1)
-# 			k = torch.cat((k, pad), dim=1)
-# 			v = torch.cat((v, pad), dim=1)
-# 			del pad
+	def do_attf(self, q, k, v):
+		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+			attn_mask=None,
+			dropout_p=0,
+			is_causal=True,
+		)
 
-# 		n_groups = min(T // self.per_group, self.n_groups)
-# 		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-# 		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-# 		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-# 		# print('\tafter c_attn out:', v[0][0][0][:20])
+	def forward(self, x):
+		B, T, C = x.size()
 
-# 		if n_groups > 1:
-# 			n_groups = T // (self.per_group + 1) if (its_time and self.idx != 0) else n_groups
-# 			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-# 			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-# 			v = v.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-# 			if not its_time and q.size(2):
-# 				qblock = q.mean(dim=3).unsqueeze(3)
-# 				kblock = k.mean(dim=3).unsqueeze(3)
-# 				vblock = v.mean(dim=3).unsqueeze(3)
-# 				q = torch.cat((q, qblock), dim=3)
-# 				k = torch.cat((k, kblock), dim=3)
-# 				v = torch.cat((v, vblock), dim=3)
-# 				T += n_groups
-# 				n_groups = min(T // self.per_group, self.n_groups)
-# 			bias = self.bias[:,:,:,:q.size(3),:q.size(3)]
-# 		else:
-# 			bias = self.bias3[:,:,:self.per_group,:self.per_group]
-# 		# print('\tafter pad,fold,mean out:', v[0][0][0][0][:20])
-# 		# So far so good. let's check the following line
-# 		x = v + self.do_att(q, k, v, bias)
-# 		# x = self.do_att(q, k, v, bias)
-# 		# So far so good. let's check the following block
-# 		if x.dim() > 4 and not its_time:
-# 			bsize = q.size(2)
-# 			blocks = x[:,:,:,-1:].view(B, self.n_heads, -1, 1, self.head_size) + self.do_att(
-# 				q[:,:,:,-1],
-# 				k[:,:,:,-1],
-# 				x[:,:,:,-1:].view(B, self.n_heads, -1, self.head_size),
-# 				self.bias2[:,:,:bsize,:bsize],
-# 			).unsqueeze(3)
-# 			r = torch.cat((blocks[:,:,:-1,:], x[:,:,1:,:-1]), dim=3)
-# 			x = torch.cat((x[:,:,:1], r), dim=2)
-# 		else:
-# 			if self.idx != 0 and x.dim() > 4:
-# 				x = x[:,:,:,1:]
-# 				T -= max(0, x.size(2))
-# 		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
-# 		x = x.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-# 		# output projection
-# 		x = self.resid_dropout(self.c_proj(x))
-# 		return x
+		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+		odd_head = (self.idx + 1) % 2
+		its_time = (self.odd_even ^ odd_head)
+		n_groups = self.n_groups
+
+		if self.idx == 0 and T % self.per_group != 0 and T > self.per_group:
+			remain = self.per_group - (T % self.per_group) 
+			comp = remain * self.dim
+			T = T + remain
+			pad = torch.zeros(B, remain, embeds_size).to(x.device)
+			q = torch.cat((q, pad), dim=1)
+			k = torch.cat((k, pad), dim=1)
+			v = torch.cat((v, pad), dim=1)
+			del pad, comp, remain
+
+		n_groups = min(T // self.per_group, self.n_groups)
+		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+
+		if n_groups > 1:
+			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+			v = v.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+			if its_time and q.size(2):
+				qblock = q.mean(dim=3).unsqueeze(3)
+				kblock = k.mean(dim=3).unsqueeze(3)
+				vblock = v.mean(dim=3).unsqueeze(3)
+				q = torch.cat((q, qblock), dim=3)
+				k = torch.cat((k, kblock), dim=3)
+				v = torch.cat((v, vblock), dim=3)
+				T += n_groups
+				n_groups = min(T // self.per_group, self.n_groups)
+			# bias = self.bias[:,:,:,:q.size(3),:q.size(3)]
+		# else:
+			# bias = self.bias3[:,:,:self.per_group,:self.per_group]
+
+		# x = self.do_att(q, k, v)
+		x = v + self.do_att(q, k, v)
+		if x.dim() > 4 and its_time:
+			y = self.do_att(
+				q[:,:,:,-1],
+				k[:,:,:,-1],
+				x[:,:,:,-1:].view(B, self.n_heads, -1, self.head_size),
+				# self.bias2[:,:,:q.size(2),:q.size(2)],
+			).unsqueeze(3)
+			r = torch.cat((y[:,:,:-1,:], x[:,:,1:,:-1]), dim=3)
+			x = torch.cat((x[:,:,:1], r), dim=2)
+		else:
+			if self.idx != 0 and x.dim() > 4:
+				x = x[:,:,:,1:]
+				T -= max(0, x.size(2))
+		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
+		x = x.transpose(1, 2).contiguous().view(B, T, C)
+		x = self.resid_dropout(self.c_proj(x))
+		return x
 
 
 class NonLinear(nn.Module):
@@ -267,7 +265,7 @@ class Block(nn.Module):
 		self.idx = idx
 		self.seq_size = config.block_size
 		self.dim = config.embeds_size
-		self.heads = CausalSelfAttention(idx)
+		self.heads = CausalSelfAttention2(idx)
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
@@ -292,21 +290,22 @@ class Block(nn.Module):
 		# head_out = self.heads(self.ln1(x))
 		# hidden_state = head_out + self.ffn(self.ln2(head_out))
 		# Pre LN with original head
-		head_out = x + self.heads(self.ln1(x))
-		hidden_state = head_out + self.ffn(self.ln1(x))
+		# head_out = self.heads(self.ln1(x))
+		# hidden_state = self.ffn(self.ln1(x))
+
 		# Post LN
-		# head_out = self.ln1(self.heads(x))
-		# hidden_state = self.ln2(head_out + self.ffn(head_out))
-		# B2C LN
-		# head_out = self.ln1(self.heads(x))
-		# hidden_state = self.ln2(head_out + self.ffn(head_out))
+		head_out = self.ln1(self.heads(x))
+		hidden_state = self.ln2(head_out + self.ffn(head_out))
+
+		# B2T connection LN https://arxiv.org/abs/2206.00330
+		# hidden_state = self.ln1(x + self.heads(x))
+		# hidden_state = self.ln2(x + hidden_state + self.ffn(hidden_state))
 
 		if config.health > 0 and config.mode == 'train':
 			config.layers_health[self.idx]['pre_layer'] = x.norm(2).item()
 			config.layers_health[self.idx]['post_attention'] = head_out.norm(2).item()
 
 		return hidden_state
-
 
 class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
