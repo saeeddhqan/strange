@@ -49,6 +49,7 @@ params = {
 	'block_size': block_size, # It needs to be 256 for bench.
 	'lr': 5e-4, # Learning rate
 	'min_lr': 6e-5, # Min earning rate
+	'lw_lr_factor': 0.05, # Layer-wise learning rate factor for increasing lr 
 	'beta1': 0.9,
 	'beta2': 0.99,
 	'decay_lr': False,
@@ -58,7 +59,7 @@ params = {
 	'batch_size': 64,
 	'num_layers': 2,
 	'num_heads': 4,
-	'dropout': 0.10,
+	'dropout': 0.1,
 	'embeds_size': embeds_size,
 	'weight_decay': 0.001,
 	'stop_loss': 1.4, # When can we stop training? once the stop_loss is <= n and once epochs are done.
@@ -80,8 +81,10 @@ params = {
 	'autocast': None,
 	'flash_attention': True,
 	'bias': False,
+	'lw_lr': False,
 	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
 	'layers_health': [],
+	'layer_wise_lr': lambda lr, nl, factor: [lr * max(1, x * (1 + factor)) for x in range(nl)]
 }
 
 # From nanoGPT
@@ -169,11 +172,11 @@ class Config:
 				'wandb', 'tensorboard', 'details', 'data_file',
 				'variation', 'device', 'mode', 'autocast',
 				'healthcare', 'flash_attention', 'compile',
-				'layers_health',
+				'layers_health', 'layer_wise_lr'
 
 			)
 		else:
-			filters = ('data_load', 'load', 'iterations', 'autocast', 'layers_health')
+			filters = ('data_load', 'load', 'iterations', 'autocast', 'layers_health', 'layer_wise_lr')
 		params = {}
 		for k in self.__data_dict__:
 			if k not in filters:
@@ -190,7 +193,7 @@ class Config:
 		'''
 
 		filters = (
-			'data_load', 'action', 'load', 'workdir', 'mode', 'layers_health')
+			'data_load', 'action', 'load', 'workdir', 'mode', 'layers_health', 'layer_wise_lr')
 		for k in params:
 			if k not in filters:
 				self.__data_dict__[k] = params[k]
@@ -312,8 +315,21 @@ class ManageModel:
 
 		if self.optimizer is None:
 			use_fused = config.device == 'cuda'
+			if config.lw_lr:
+				learning_rates = config.layer_wise_lr(config.lr, config.num_layers, config.lw_lr_factor)
+				learning_rates.reverse()
+				params = [{'params': self.model.stack.parameters(), 'lr': config.lr}]
+				params_layers = [
+					{
+						'params': self.model.blocks[x].parameters(),
+						'lr': learning_rates[x],
+					}
+					for x in range(config.num_layers)
+				]
+				params.extend(params_layers)
+
 			self.optimizer = torch.optim.AdamW(
-				self.model.parameters(),
+				self.model.parameters() if not config.lw_lr else params,
 				lr=config.lr,
 				# amsgrad=True, # Found amsgrad better.
 				# betas=(config.beta1, config.beta2),
@@ -323,6 +339,7 @@ class ManageModel:
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
 				comment='_' + config.variation,
+				filename_suffix=''
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
@@ -400,7 +417,7 @@ class ManageModel:
 			for k in range(config.eval_iterations):
 				X, y = config.data_load.get_batch(0, split)
 				with config.autocast:
-					_, loss = self.model(X, y, k)
+					_, loss = self.model(X, y)
 				losses[k] = loss.item()
 			out[split] = losses.mean()
 
@@ -457,9 +474,23 @@ class ManageModel:
 		epoch_loss = 0
 
 		if config.decay_lr:
-			lr = get_lr(epoch + 1, lr_decay_iters=config.iterations, lr=config.lr, min_lr=config.min_lr)
-			for param_groups in self.optimizer.param_groups:
-				param_groups['lr'] = lr
+			lr = get_lr(
+				epoch + 1,
+				lr_decay_iters=config.iterations,
+				lr=config.lr,
+				min_lr=config.min_lr,
+			)
+			if config.lw_lr:
+				learning_rates = config.layer_wise_lr(lr, config.num_layers, config.lw_lr_factor)
+				learning_rates.reverse()
+				self.optimizer.param_groups[0]['lr'] = lr
+				for x, param_groups in enumerate(self.optimizer.param_groups[1:]):
+					param_groups['lr'] = learning_rates[x]
+			else:
+				for param_group in self.optimizer.param_groups:
+					param_group['lr'] = lr
+
+		lr = config.lr if not config.decay_lr else lr
 
 		if config.health > 0:
 			config.layers_health = [{} for _ in range(config.num_layers)]
@@ -480,10 +511,8 @@ class ManageModel:
 		self.elapsed_time += stop - start
 
 		if config.health > 0:
-			lr = config.lr if config.decay_lr else lr
 			self.net_health(epoch, lr)
-		# if epoch == 0:
-			# exit()
+
 
 		return epoch_loss
 

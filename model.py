@@ -131,116 +131,116 @@ class CausalSelfAttention(nn.Module):
 		y = self.resid_dropout(self.c_proj(y))
 		return y
 
-class CausalSelfAttention2(nn.Module):
-	def __init__(self, idx: int):
-		super().__init__()
-		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
-		self.idx = idx
-		self.dim = config.embeds_size
-		self.n_heads = config.num_heads
-		self.n_layers = config.num_layers
-		self.head_size = self.dim // self.n_heads
-		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
-		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
-		self.dropout = config.dropout
-		# self.attn_dropout = nn.Dropout(self.dropout)
-		self.resid_dropout = nn.Dropout(self.dropout)
-		# self.n_groups = 64
-		self.n_groups = int(config.block_size ** 0.5)
-		self.per_group = (config.block_size // self.n_groups)
-		self.odd_even = self.n_layers % 2
+# class CausalSelfAttention2(nn.Module):
+# 	def __init__(self, idx: int):
+# 		super().__init__()
+# 		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
+# 		self.idx = idx
+# 		self.dim = config.embeds_size
+# 		self.n_heads = config.num_heads
+# 		self.n_layers = config.num_layers
+# 		self.head_size = self.dim // self.n_heads
+# 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
+# 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
+# 		self.dropout = config.dropout
+# 		# self.attn_dropout = nn.Dropout(self.dropout)
+# 		self.resid_dropout = nn.Dropout(self.dropout)
+# 		# self.n_groups = 64
+# 		self.n_groups = int(config.block_size ** 0.5)
+# 		self.per_group = (config.block_size // self.n_groups)
+# 		self.odd_even = self.n_layers % 2
 
-		self.flash = config.flash_attention and hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+# 		self.flash = config.flash_attention and hasattr(torch.nn.functional, 'scaled_dot_product_attention')
 
-		# self.register_buffer('bias', torch.tril(torch.ones(self.per_group + 1, self.per_group + 1))
-		# 							.view(1, 1, 1, self.per_group + 1, self.per_group + 1))
-		# self.register_buffer('bias2', torch.tril(torch.ones(self.n_groups, self.n_groups))
-		# 							.view(1, 1, self.n_groups, self.n_groups))
-		# self.register_buffer('bias3', torch.tril(torch.ones(self.per_group, self.per_group))
-		# 							.view(1, 1, self.per_group, self.per_group))
+# 		# self.register_buffer('bias', torch.tril(torch.ones(self.per_group + 1, self.per_group + 1))
+# 		# 							.view(1, 1, 1, self.per_group + 1, self.per_group + 1))
+# 		# self.register_buffer('bias2', torch.tril(torch.ones(self.n_groups, self.n_groups))
+# 		# 							.view(1, 1, self.n_groups, self.n_groups))
+# 		# self.register_buffer('bias3', torch.tril(torch.ones(self.per_group, self.per_group))
+# 		# 							.view(1, 1, self.per_group, self.per_group))
 
 
-	def do_att(self, q, k, v, bias):
-		if self.flash:
-			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-				attn_mask=None,
-				dropout_p=0,
-				is_causal=True,
-			)
-		else:
-			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-			att = att.masked_fill(bias == 0, float('-inf'))
-			att = F.softmax(att, dim=-1)
-			# att = self.attn_dropout(att) # Find a replacement for it.
-			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
-		return y
+# 	def do_att(self, q, k, v, bias):
+# 		if self.flash:
+# 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+# 				attn_mask=None,
+# 				dropout_p=0,
+# 				is_causal=True,
+# 			)
+# 		else:
+# 			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+# 			att = att.masked_fill(bias == 0, float('-inf'))
+# 			att = F.softmax(att, dim=-1)
+# 			# att = self.attn_dropout(att) # Find a replacement for it.
+# 			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
+# 		return y
 
-	def do_attf(self, q, k, v):
-		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-			attn_mask=None,
-			dropout_p=0,
-			is_causal=True,
-		)
+# 	def do_attf(self, q, k, v):
+# 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+# 			attn_mask=None,
+# 			dropout_p=0,
+# 			is_causal=True,
+# 		)
 
-	def forward(self, x):
-		B, T, C = x.size()
+# 	def forward(self, x):
+# 		B, T, C = x.size()
 
-		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
-		odd_head = (self.idx + 1) % 2
-		its_time = (self.odd_even ^ odd_head)
-		n_groups = self.n_groups
+# 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+# 		odd_head = (self.idx + 1) % 2
+# 		its_time = (self.odd_even ^ odd_head)
+# 		n_groups = self.n_groups
 
-		if self.idx == 0 and T % self.per_group != 0 and T > self.per_group:
-			remain = self.per_group - (T % self.per_group) 
-			comp = remain * self.dim
-			T = T + remain
-			pad = torch.zeros(B, remain, embeds_size).to(x.device)
-			q = torch.cat((q, pad), dim=1)
-			k = torch.cat((k, pad), dim=1)
-			v = torch.cat((v, pad), dim=1)
-			del pad, comp, remain
+# 		if self.idx == 0 and T % self.per_group != 0 and T > self.per_group:
+# 			remain = self.per_group - (T % self.per_group) 
+# 			comp = remain * self.dim
+# 			T = T + remain
+# 			pad = torch.zeros(B, remain, embeds_size).to(x.device)
+# 			q = torch.cat((q, pad), dim=1)
+# 			k = torch.cat((k, pad), dim=1)
+# 			v = torch.cat((v, pad), dim=1)
+# 			del pad, comp, remain
 
-		n_groups = min(T // self.per_group, self.n_groups)
-		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+# 		n_groups = min(T // self.per_group, self.n_groups)
+# 		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+# 		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+# 		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
 
-		if n_groups > 1:
-			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-			v = v.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-			if its_time and q.size(2):
-				qblock = q.mean(dim=3).unsqueeze(3)
-				kblock = k.mean(dim=3).unsqueeze(3)
-				vblock = v.mean(dim=3).unsqueeze(3)
-				q = torch.cat((q, qblock), dim=3)
-				k = torch.cat((k, kblock), dim=3)
-				v = torch.cat((v, vblock), dim=3)
-				T += n_groups
-				n_groups = min(T // self.per_group, self.n_groups)
-			# bias = self.bias[:,:,:,:q.size(3),:q.size(3)]
-		# else:
-			# bias = self.bias3[:,:,:self.per_group,:self.per_group]
+# 		if n_groups > 1:
+# 			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+# 			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+# 			v = v.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+# 			if its_time and q.size(2):
+# 				qblock = q.mean(dim=3).unsqueeze(3)
+# 				kblock = k.mean(dim=3).unsqueeze(3)
+# 				vblock = v.mean(dim=3).unsqueeze(3)
+# 				q = torch.cat((q, qblock), dim=3)
+# 				k = torch.cat((k, kblock), dim=3)
+# 				v = torch.cat((v, vblock), dim=3)
+# 				T += n_groups
+# 				n_groups = min(T // self.per_group, self.n_groups)
+# 			# bias = self.bias[:,:,:,:q.size(3),:q.size(3)]
+# 		# else:
+# 		# 	bias = self.bias3[:,:,:self.per_group,:self.per_group]
 
-		# x = self.do_att(q, k, v)
-		x = v + self.do_att(q, k, v)
-		if x.dim() > 4 and its_time:
-			y = self.do_att(
-				q[:,:,:,-1],
-				k[:,:,:,-1],
-				x[:,:,:,-1:].view(B, self.n_heads, -1, self.head_size),
-				# self.bias2[:,:,:q.size(2),:q.size(2)],
-			).unsqueeze(3)
-			r = torch.cat((y[:,:,:-1,:], x[:,:,1:,:-1]), dim=3)
-			x = torch.cat((x[:,:,:1], r), dim=2)
-		else:
-			if self.idx != 0 and x.dim() > 4:
-				x = x[:,:,:,1:]
-				T -= max(0, x.size(2))
-		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
-		x = x.transpose(1, 2).contiguous().view(B, T, C)
-		x = self.resid_dropout(self.c_proj(x))
-		return x
+# 		# x = self.do_att(q, k, v)
+# 		x = v + self.do_attf(q, k, v)
+# 		if x.dim() > 4 and its_time:
+# 			y = self.do_attf(
+# 				q[:,:,:,-1],
+# 				k[:,:,:,-1],
+# 				x[:,:,:,-1:].view(B, self.n_heads, -1, self.head_size),
+# 				# self.bias2[:,:,:q.size(2),:q.size(2)],
+# 			).unsqueeze(3)
+# 			r = torch.cat((y[:,:,:-1,:], x[:,:,1:,:-1]), dim=3)
+# 			x = torch.cat((x[:,:,:1], r), dim=2)
+# 		else:
+# 			if self.idx != 0 and x.dim() > 4:
+# 				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
+# 				T -= max(0, x.size(2))
+# 		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
+# 		x = x.transpose(1, 2).contiguous().view(B, T, C)
+# 		x = self.resid_dropout(self.c_proj(x))
+# 		return x
 
 
 class NonLinear(nn.Module):
@@ -262,50 +262,130 @@ class NonLinear(nn.Module):
 class Block(nn.Module):
 	def __init__(self, idx: int):
 		super().__init__()
+		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
 		self.idx = idx
-		self.seq_size = config.block_size
 		self.dim = config.embeds_size
-		self.heads = CausalSelfAttention2(idx)
+		self.n_heads = config.num_heads
+		self.n_layers = config.num_layers
+		self.head_size = self.dim // self.n_heads
+		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
+		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
+		self.dropout = config.dropout
+		self.resid_dropout = nn.Dropout(self.dropout)
+		# self.n_groups = int(config.block_size ** 0.5)
+		self.n_groups = 4
+		self.per_group = (config.block_size // self.n_groups)
+		self.odd_even = self.n_layers % 2
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
-		# self.ln1 = nn.LayerNorm(self.dim)
-		# self.ln2 = nn.LayerNorm(self.dim)
+		# self.ln3 = RMSNorm(self.head_size)
+		self.flash = config.flash_attention
+		# self.causal_self_attention = CausalSelfAttention(self.idx)
 
+	def forward(self, x, y=None):
+		B, T, C = x.shape
 
-	def forward(self, x):
-		'''
-			Init forward method.
-
-			Parameters
-			----------
-			x: Tensor
-				input tensor
-			Returns
-			-------
-			hidden_state: Tensor
-				output tensor
-		'''
 		# Pre LN
-		# head_out = self.heads(self.ln1(x))
-		# hidden_state = head_out + self.ffn(self.ln2(head_out))
-		# Pre LN with original head
-		# head_out = self.heads(self.ln1(x))
-		# hidden_state = self.ffn(self.ln1(x))
+		head_out, y = self.causal_self_attention(self.ln1(x), y)
+		# head_out = self.causal_self_attention(self.ln1(x))
+		res_con = x + head_out
+		hidden_state = res_con + self.ffn(self.ln2(res_con))
 
 		# Post LN
-		head_out = self.ln1(self.heads(x))
-		hidden_state = self.ln2(head_out + self.ffn(head_out))
+		# head_out = self.ln1(self.heads(x))
+		# hidden_state = self.ln2(head_out + self.ffn(head_out))
 
 		# B2T connection LN https://arxiv.org/abs/2206.00330
 		# hidden_state = self.ln1(x + self.heads(x))
 		# hidden_state = self.ln2(x + hidden_state + self.ffn(hidden_state))
+		# head_out, y = self.causal_self_attention(x, y)
+		# # head_out = self.causal_self_attention(self.ln1(x))
+		# res_con = self.ln1(x + head_out)
+		# hidden_state = self.ln2(x + res_con + self.ffn(res_con))
 
 		if config.health > 0 and config.mode == 'train':
 			config.layers_health[self.idx]['pre_layer'] = x.norm(2).item()
 			config.layers_health[self.idx]['post_attention'] = head_out.norm(2).item()
 
-		return hidden_state
+		return hidden_state, y
+
+	def do_att(self, q, k, v):
+		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+				attn_mask=None,
+				dropout_p=config.dropout if self.training else 0,
+				is_causal=True,
+			)
+
+	def do_block_merge(self, xblock, x):
+		other_blocks = torch.cat((xblock, x[:,:,1:,:]), dim=3)
+		first_block = torch.cat((x[:,:,:1], xblock[:,:,:1,-1:]), dim=3)
+		x = torch.cat((first_block, other_blocks), dim=2)
+		return x
+
+	def causal_self_attention(self, x, y):
+		B, T, C = x.size()
+
+		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+		its_time = self.odd_even ^ ((self.idx + 1) % 2)
+		n_groups = self.n_groups
+
+		if self.idx == 0 and T % self.per_group != 0 and T > self.per_group:
+			remain = self.per_group - (T % self.per_group) 
+			comp = remain * self.dim
+			T = T + remain
+			pad = torch.zeros(B, remain, embeds_size).to(x.device)
+			q = torch.cat((q, pad), dim=1)
+			k = torch.cat((k, pad), dim=1)
+			v = torch.cat((v, pad), dim=1)
+			del pad, comp, remain
+
+		n_groups = min(T // self.per_group, self.n_groups)
+		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
+		if n_groups > 1:
+			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+			v = v.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
+			if its_time and q.size(2):
+				qblock = q.mean(dim=3).unsqueeze(3)
+				kblock = k.mean(dim=3).unsqueeze(3)
+				vblock = v.mean(dim=3).unsqueeze(3)
+				q = torch.cat((q, qblock), dim=3)
+				k = torch.cat((k, kblock), dim=3)
+				v = torch.cat((v, vblock), dim=3)
+			elif y is not None:
+				qblock, kblock, vblock = y
+				q = self.do_block_merge(qblock, q)
+				k = self.do_block_merge(qblock, k)
+				v = self.do_block_merge(vblock, v)
+
+			T += 1
+
+		# x = v + self.do_att(q, k, v)
+		x = self.do_att(q, k, v)
+		if x.dim() > 4 and its_time: # Try run block attention in every layer.
+			# remove last block from q, k, v
+			q, k = q[:,:,:-1,-1], k[:,:,:-1,-1]
+			v = self.do_att(
+				q,
+				k,
+				x[:,:,:-1,-1:].view(B, self.n_heads, -1, self.head_size),
+			).unsqueeze(3)
+			y = (q.unsqueeze(3), k.unsqueeze(3), v)
+			x = x[:,:,:,:-1] # crop footprints(blocks)
+			T -= 1
+		else:
+			if not its_time and x.dim() > 4:
+				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
+				T -= 1
+			y = None
+		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
+		x = x.transpose(1, 2).contiguous().view(B, T, C)
+		x = self.resid_dropout(self.c_proj(x))
+		return x, y
+
 
 class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
@@ -316,9 +396,9 @@ class Transformer(nn.Module):
 			pos_embs=nn.Embedding(config.block_size, self.dim),
 			dropout=nn.Dropout(config.dropout),
 			ln1=RMSNorm(self.dim),
-			blocks=nn.ModuleList([Block(idx) for idx in range(config.num_layers)]),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
+		self.blocks = nn.ModuleList([Block(idx) for idx in range(config.num_layers)])
 		self.stack.tok_embs.weight = self.stack.lm_head.weight
 		self.apply(self.norm_weights)
 		self.count_params = self.num_params() / 1e6
@@ -327,12 +407,6 @@ class Transformer(nn.Module):
 		for name, p in self.named_parameters():
 			if name.endswith('c_proj.weight'):
 				torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.num_layers))
-			if name.endswith('c_attn.weight'):
-				torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.num_layers))
-			if name.endswith('c_attn.bias'):
-				torch.nn.init.zeros_(p)
-			if name.endswith('c_proj.bias'):
-				torch.nn.init.zeros_(p)
 
 		print("Number of parameters: %.2fM" % (self.count_params,))
 
@@ -349,7 +423,6 @@ class Transformer(nn.Module):
 			n_params: int
 				number of parameters 
 		'''
-		x = self.stack
 		n_params = sum(p.numel() for p in self.parameters())
 		n_params -= self.stack.pos_embs.weight.numel()
 		n_params -= self.stack.tok_embs.weight.numel()
@@ -395,9 +468,9 @@ class Transformer(nn.Module):
 
 		x = tok_emb + pos_emb
 		x = self.stack.dropout(x)
-
-		for block in self.stack.blocks:
-			x = block(x)
+		y = None
+		for block in self.blocks:
+			x, y = block(x,y)
 
 		if targets is None: # for autocemplete method
 			x = x[:,-1]

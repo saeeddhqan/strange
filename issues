@@ -2,3 +2,5 @@
 - One reason is padding and getting mean.
 - Another idea for q,k,v values is to get the mean of their previous tokens for each q,k,v separately.
 - Add overall score for layers along with checking vector values to check gradient vanishing.
+- pre LN works better with the group head.
+- Let's try layer-wise learning rate

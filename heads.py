@@ -162,6 +162,7 @@ class CausalSelfAttention2(nn.Module):
 				q = torch.cat((q, qblock), dim=3)
 				k = torch.cat((k, kblock), dim=3)
 				v = torch.cat((v, vblock), dim=3)
+				print(vblock.shape)
 				T += n_groups
 				n_groups = min(T // self.per_group, self.n_groups)
 			# bias = self.bias[:,:,:,:q.size(3),:q.size(3)]
@@ -173,16 +174,20 @@ class CausalSelfAttention2(nn.Module):
 		if x.dim() > 4 and its_time:
 			# y = x[:,:,:,-1:].view(B, self.n_heads, -1, 1, self.head_size) + self.do_att(
 			y = self.do_att(
-				q[:,:,:,-1],
-				k[:,:,:,-1],
-				x[:,:,:,-1:].view(B, self.n_heads, -1, self.head_size),
+				q[:,:,:-1,-1],
+				k[:,:,:-1,-1],
+				x[:,:,:-1,-1:].view(B, self.n_heads, -1, self.head_size),
 				# self.bias2[:,:,:q.size(2),:q.size(2)],
 			).unsqueeze(3)
-			r = torch.cat((y[:,:,:-1,:], x[:,:,1:,:-1]), dim=3)
+			print(y.shape)
+			r = torch.cat((y, x[:,:,1:,:-1]), dim=3)
 			x = torch.cat((x[:,:,:1], r), dim=2)
 		else:
 			if self.idx != 0 and x.dim() > 4:
-				x = x[:,:,:,1:]
+				# x = x[:,:,:,1:] # there might be a leakage here.
+				# block = torch.cat((x[:,:,:1,:-2], x[:,:,:1,-1:]), dim=3)
+				# x = torch.cat((block, x[:,:,1:,1:]), dim=2) # solving a leakage
+				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2) # solving a leakage
 				T -= max(0, x.size(2))
 		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
 		x = x.transpose(1, 2).contiguous().view(B, T, C)
@@ -217,8 +222,8 @@ class layers(nn.Module):
 			# print(x[0][0].mean(dim=0).item(), x[0][0].abs().mean(dim=0).item())
 			x = self.ln(i(x))
 			print(x.shape, x.norm(2).item())
-		# print(x.shape)
-		print(x[0][0])
+		print(x.shape)
+		# print(x[0][0])
 
 # a = layers().cuda()
 # b = torch.rand(3, block_size, embeds_size).cuda()
@@ -244,15 +249,15 @@ print('passed complete')
 # a(barely3)
 # print('passed barely3')
 # print(hasattr(a, 'named_parameters'))
-for param in a.parameters():
-	# print(param)
-	# print(param[1].norm(2).item())
-	# print(param[1].mean(dim=-1))
-	# print(dir(param))
-	# exit()
-	# print(param.grad)
-	if param.grad is not None:
-		print(param[1].grad)
+# for param in a.parameters():
+# 	# print(param)
+# 	# print(param[1].norm(2).item())
+# 	# print(param[1].mean(dim=-1))
+# 	# print(dir(param))
+# 	# exit()
+# 	# print(param.grad)
+# 	if param.grad is not None:
+# 		print(param[1].grad)
 # t0 = time.time()
 # for i in range(1000):
 # 	a(complete)
