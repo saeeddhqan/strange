@@ -251,12 +251,12 @@ class NonLinear(nn.Module):
 		self.w1 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias) # bias=False in llama
 		self.w2 = nn.Linear(4 * self.dim, self.dim, bias=config.bias) # bias=False in llama
 		self.w3 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias) # bias=False in llama
-
+		self.dropout = nn.Dropout(config.dropout)
 	def forward(self, x: Tensor):
 		'''
 			Init forward method.
 		'''
-		return self.w2(F.silu(self.w1(x)) * self.w3(x))
+		return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 
 class Block(nn.Module):
@@ -268,18 +268,22 @@ class Block(nn.Module):
 		self.n_heads = config.num_heads
 		self.n_layers = config.num_layers
 		self.head_size = self.dim // self.n_heads
-		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
+		self.c_attn_v = nn.Linear(self.dim, self.dim, config.bias)
+		self.c_attn_qk = nn.Linear(self.dim, self.dim * 2, True)
+		# self.c_attn_q = nn.Linear(self.dim, self.dim, True)
+		# self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.dropout = config.dropout
 		self.resid_dropout = nn.Dropout(self.dropout)
+		self.block_drop = nn.Dropout(self.dropout)
 		# self.n_groups = int(config.block_size ** 0.5)
-		self.n_groups = 4
+		self.n_groups = 2
 		self.per_group = (config.block_size // self.n_groups)
 		self.odd_even = self.n_layers % 2
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
-		# self.ln3 = RMSNorm(self.head_size)
+		self.ln3 = RMSNorm(self.head_size)
 		self.flash = config.flash_attention
 		# self.causal_self_attention = CausalSelfAttention(self.idx)
 
@@ -287,22 +291,14 @@ class Block(nn.Module):
 		B, T, C = x.shape
 
 		# Pre LN
+		if y is not None:
+			y = (self.block_drop(y[0]), self.block_drop(y[1]), self.block_drop(y[2]))
+			y = (self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2]))
 		head_out, y = self.causal_self_attention(self.ln1(x), y)
 		# head_out = self.causal_self_attention(self.ln1(x))
 		res_con = x + head_out
 		hidden_state = res_con + self.ffn(self.ln2(res_con))
 
-		# Post LN
-		# head_out = self.ln1(self.heads(x))
-		# hidden_state = self.ln2(head_out + self.ffn(head_out))
-
-		# B2T connection LN https://arxiv.org/abs/2206.00330
-		# hidden_state = self.ln1(x + self.heads(x))
-		# hidden_state = self.ln2(x + hidden_state + self.ffn(hidden_state))
-		# head_out, y = self.causal_self_attention(x, y)
-		# # head_out = self.causal_self_attention(self.ln1(x))
-		# res_con = self.ln1(x + head_out)
-		# hidden_state = self.ln2(x + res_con + self.ffn(res_con))
 
 		if config.health > 0 and config.mode == 'train':
 			config.layers_health[self.idx]['pre_layer'] = x.norm(2).item()
@@ -313,7 +309,8 @@ class Block(nn.Module):
 	def do_att(self, q, k, v):
 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 				attn_mask=None,
-				dropout_p=config.dropout if self.training else 0,
+				dropout_p=0,
+				# dropout_p=config.dropout if self.training else 0,
 				is_causal=True,
 			)
 
@@ -325,8 +322,10 @@ class Block(nn.Module):
 
 	def causal_self_attention(self, x, y):
 		B, T, C = x.size()
-
-		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+		v = self.c_attn_v(x)
+		q, k = self.c_attn_qk(v).split(self.dim, dim=2)
+		# q = self.c_attn_q(v) # Note
+		# q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 		its_time = self.odd_even ^ ((self.idx + 1) % 2)
 		n_groups = self.n_groups
 
