@@ -27,8 +27,8 @@ class Data:
 			tok = '\n~\n'.join(dataset['text'])
 			return tok
 
-		text_train = prepare_split('train', 1000)
-		text_test = prepare_split('validation', 100)
+		text_train = prepare_split('train', 20000)
+		text_test = prepare_split('validation', 2000)
 
 		self.chars = sorted(list(set(text_train + text_test)))
 		self.vocab_size = len(self.chars)
