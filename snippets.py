@@ -1,4 +1,11 @@
 # eps_emb:
+		# self.pad = 8
+		# self.eps_dim = self.pad * 4
+		# self.stack = nn.ModuleDict(dict(
+		# 	tok_embs=nn.Embedding(config.vocab_size, self.dim - self.eps_dim),
+		# 	pos_embs=nn.Embedding(config.block_size, self.dim - self.eps_dim),
+		# 	eps_tok_embs=nn.Embedding(config.vocab_size + 1, 4),
+		# 	eps_pos_embs=nn.Embedding(config.block_size, 4),
 		# xseq = F.pad(seq + 1, (self.pad, 0)).unfold(1, self.pad, 1)[:,:-1,:]
 		# bseq = F.pad(arange, (self.pad, 0)).unfold(0, self.pad, 1)[1:,:]
 		# eps_embs = self.stack.eps_embs(xseq)

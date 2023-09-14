@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from datasets import load_dataset
 from typing import NoReturn, ClassVar, Union, Optional
 import math
 
@@ -17,25 +18,35 @@ class Data:
 			config: ClassVar
 				config instance
 		'''
-		with open(config.data_file) as fp:
-			text = fp.read()
+		model_name = 'roneneldan/TinyStories-Instruct-33M'
+		dataset_name = 'roneneldan/TinyStories'
 
-		self.chars = sorted(list(set(text)))
+		def prepare_split(split, story_len):
+			dataset = load_dataset(dataset_name, split=split)
+			dataset = dataset.select(range(story_len))
+			tok = '\n~\n'.join(dataset['text'])
+			return tok
+
+		text_train = prepare_split('train', 1000)
+		text_test = prepare_split('validation', 100)
+
+		self.chars = sorted(list(set(text_train + text_test)))
 		self.vocab_size = len(self.chars)
 		config.vocab_size = self.vocab_size
 		self.stoi = {c:i for i,c in enumerate(self.chars)}
 		self.itos = {i:c for c,i in self.stoi.items()}
 		self.encode = lambda s: [self.stoi[x] for x in s]
 		self.decode = lambda e: ''.join([self.itos[x] for x in e])
-		data = torch.tensor(self.encode(text), dtype=torch.long)
-		if config.device == 'cuda':
-			data = data.pin_memory().to(config.device, non_blocking=True)
 
-		train_split = int(0.9 * len(data))
-		self.train_data = data[:train_split]
-		self.test_data = data[train_split:]
+		self.train_data = torch.tensor(self.encode(text_train), dtype=torch.long)
+		self.test_data = torch.tensor(self.encode(text_test), dtype=torch.long)
+		if config.device == 'cuda':
+			self.train_data = self.train_data.pin_memory().to(config.device, non_blocking=True)
+			self.test_data = self.test_data.pin_memory().to(config.device, non_blocking=True)
+
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
+
 
 	def __len__(self):
 		return self.vocab_size
@@ -130,117 +141,6 @@ class CausalSelfAttention(nn.Module):
 		# output projection
 		y = self.resid_dropout(self.c_proj(y))
 		return y
-
-# class CausalSelfAttention2(nn.Module):
-# 	def __init__(self, idx: int):
-# 		super().__init__()
-# 		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
-# 		self.idx = idx
-# 		self.dim = config.embeds_size
-# 		self.n_heads = config.num_heads
-# 		self.n_layers = config.num_layers
-# 		self.head_size = self.dim // self.n_heads
-# 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
-# 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
-# 		self.dropout = config.dropout
-# 		# self.attn_dropout = nn.Dropout(self.dropout)
-# 		self.resid_dropout = nn.Dropout(self.dropout)
-# 		# self.n_groups = 64
-# 		self.n_groups = int(config.block_size ** 0.5)
-# 		self.per_group = (config.block_size // self.n_groups)
-# 		self.odd_even = self.n_layers % 2
-
-# 		self.flash = config.flash_attention and hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-
-# 		# self.register_buffer('bias', torch.tril(torch.ones(self.per_group + 1, self.per_group + 1))
-# 		# 							.view(1, 1, 1, self.per_group + 1, self.per_group + 1))
-# 		# self.register_buffer('bias2', torch.tril(torch.ones(self.n_groups, self.n_groups))
-# 		# 							.view(1, 1, self.n_groups, self.n_groups))
-# 		# self.register_buffer('bias3', torch.tril(torch.ones(self.per_group, self.per_group))
-# 		# 							.view(1, 1, self.per_group, self.per_group))
-
-
-# 	def do_att(self, q, k, v, bias):
-# 		if self.flash:
-# 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-# 				attn_mask=None,
-# 				dropout_p=0,
-# 				is_causal=True,
-# 			)
-# 		else:
-# 			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-# 			att = att.masked_fill(bias == 0, float('-inf'))
-# 			att = F.softmax(att, dim=-1)
-# 			# att = self.attn_dropout(att) # Find a replacement for it.
-# 			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
-# 		return y
-
-# 	def do_attf(self, q, k, v):
-# 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-# 			attn_mask=None,
-# 			dropout_p=0,
-# 			is_causal=True,
-# 		)
-
-# 	def forward(self, x):
-# 		B, T, C = x.size()
-
-# 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
-# 		odd_head = (self.idx + 1) % 2
-# 		its_time = (self.odd_even ^ odd_head)
-# 		n_groups = self.n_groups
-
-# 		if self.idx == 0 and T % self.per_group != 0 and T > self.per_group:
-# 			remain = self.per_group - (T % self.per_group) 
-# 			comp = remain * self.dim
-# 			T = T + remain
-# 			pad = torch.zeros(B, remain, embeds_size).to(x.device)
-# 			q = torch.cat((q, pad), dim=1)
-# 			k = torch.cat((k, pad), dim=1)
-# 			v = torch.cat((v, pad), dim=1)
-# 			del pad, comp, remain
-
-# 		n_groups = min(T // self.per_group, self.n_groups)
-# 		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-# 		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-# 		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-
-# 		if n_groups > 1:
-# 			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-# 			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-# 			v = v.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-# 			if its_time and q.size(2):
-# 				qblock = q.mean(dim=3).unsqueeze(3)
-# 				kblock = k.mean(dim=3).unsqueeze(3)
-# 				vblock = v.mean(dim=3).unsqueeze(3)
-# 				q = torch.cat((q, qblock), dim=3)
-# 				k = torch.cat((k, kblock), dim=3)
-# 				v = torch.cat((v, vblock), dim=3)
-# 				T += n_groups
-# 				n_groups = min(T // self.per_group, self.n_groups)
-# 			# bias = self.bias[:,:,:,:q.size(3),:q.size(3)]
-# 		# else:
-# 		# 	bias = self.bias3[:,:,:self.per_group,:self.per_group]
-
-# 		# x = self.do_att(q, k, v)
-# 		x = v + self.do_attf(q, k, v)
-# 		if x.dim() > 4 and its_time:
-# 			y = self.do_attf(
-# 				q[:,:,:,-1],
-# 				k[:,:,:,-1],
-# 				x[:,:,:,-1:].view(B, self.n_heads, -1, self.head_size),
-# 				# self.bias2[:,:,:q.size(2),:q.size(2)],
-# 			).unsqueeze(3)
-# 			r = torch.cat((y[:,:,:-1,:], x[:,:,1:,:-1]), dim=3)
-# 			x = torch.cat((x[:,:,:1], r), dim=2)
-# 		else:
-# 			if self.idx != 0 and x.dim() > 4:
-# 				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
-# 				T -= max(0, x.size(2))
-# 		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
-# 		x = x.transpose(1, 2).contiguous().view(B, T, C)
-# 		x = self.resid_dropout(self.c_proj(x))
-# 		return x
 
 
 class NonLinear(nn.Module):
@@ -390,15 +290,19 @@ class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
 		super().__init__()
 		self.dim = config.embeds_size
+		self.pad = 8
+		self.eps_dim = self.pad * 4
 		self.stack = nn.ModuleDict(dict(
-			tok_embs=nn.Embedding(config.vocab_size, self.dim),
-			pos_embs=nn.Embedding(config.block_size, self.dim),
+			tok_embs=nn.Embedding(config.vocab_size, self.dim - self.eps_dim),
+			pos_embs=nn.Embedding(config.block_size, self.dim - self.eps_dim),
+			eps_tok_embs=nn.Embedding(config.vocab_size + 1, 4),
+			eps_pos_embs=nn.Embedding(config.block_size, 4),
 			dropout=nn.Dropout(config.dropout),
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
 		self.blocks = nn.ModuleList([Block(idx) for idx in range(config.num_layers)])
-		self.stack.tok_embs.weight = self.stack.lm_head.weight
+		# self.stack.tok_embs.weight = self.stack.lm_head.weight
 		self.apply(self.norm_weights)
 		self.count_params = self.num_params() / 1e6
 		config.parameters = self.count_params
@@ -465,7 +369,18 @@ class Transformer(nn.Module):
 		arange = torch.arange(T, device=seq.device)
 		pos_emb = self.stack.pos_embs(arange)
 
-		x = tok_emb + pos_emb
+		xseq = F.pad(seq + 1, (self.pad, 0)).unfold(1, self.pad, 1)[:,:-1,:]
+		bseq = F.pad(arange, (self.pad, 0)).unfold(0, self.pad, 1)[1:,:]
+		eps_embs = self.stack.eps_tok_embs(xseq)
+		eps_pos_embs = self.stack.eps_pos_embs(bseq)
+		eps_embs = eps_embs + eps_pos_embs
+		# eps_comb = torch.cat([
+		# 	eps_embs.view(B, T, -1),
+		# 	eps_pos_embs.view(1, T, -1).expand(B, T, -1)],
+		# 	dim=-1,
+		# )
+		x = torch.cat([tok_emb + pos_emb, eps_embs.view(B, T, -1)], dim=-1)
+		# x = tok_emb + pos_emb
 		x = self.stack.dropout(x)
 		y = None
 		for block in self.blocks:

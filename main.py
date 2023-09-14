@@ -437,7 +437,7 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		seq, elapsed, elapsed_per_token = self.generator()
+		seq, elapsed, elapsed_per_token = self.generator(seq_len=300)
 		print(seq)
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
