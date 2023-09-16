@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from datasets import load_dataset
+from transformers import AutoTokenizer
 from typing import NoReturn, ClassVar, Union, Optional
 import math
 
@@ -20,29 +21,29 @@ class Data:
 		'''
 		model_name = 'roneneldan/TinyStories-Instruct-33M'
 		dataset_name = 'roneneldan/TinyStories'
+		tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+		# def tokenization(example):
+		# 	txt = [txt + '\n<|endoftext|>\n' for txt in example['text']]
+		# 	tok = tokenizer(txt)['input_ids']
+		# 	return {'seq': tok}
 
 		def prepare_split(split, story_len):
 			dataset = load_dataset(dataset_name, split=split)
 			dataset = dataset.select(range(story_len))
-			tok = '\n~\n'.join(dataset['text'])
-			return tok
+			txt = [torch.tensor(tokenizer(txt['text'] + '\n<|endoftext|>\n')['input_ids']) for txt in dataset]
+			dataset = torch.cat(txt).to(torch.long)
+			return dataset
 
-		text_train = prepare_split('train', 20000)
-		text_test = prepare_split('validation', 2000)
-
-		self.chars = sorted(list(set(text_train + text_test)))
-		self.vocab_size = len(self.chars)
+		self.decode = lambda x: tokenizer.decode(x)
+		self.vocab_size = tokenizer.vocab_size
 		config.vocab_size = self.vocab_size
-		self.stoi = {c:i for i,c in enumerate(self.chars)}
-		self.itos = {i:c for c,i in self.stoi.items()}
-		self.encode = lambda s: [self.stoi[x] for x in s]
-		self.decode = lambda e: ''.join([self.itos[x] for x in e])
 
-		self.train_data = torch.tensor(self.encode(text_train), dtype=torch.long)
-		self.test_data = torch.tensor(self.encode(text_test), dtype=torch.long)
-		if config.device == 'cuda':
-			self.train_data = self.train_data.pin_memory().to(config.device, non_blocking=True)
-			self.test_data = self.test_data.pin_memory().to(config.device, non_blocking=True)
+		self.train_data = prepare_split('train', 100000)
+		self.test_data = prepare_split('validation', 10000)
+		# if config.device == 'cuda':
+		# 	self.train_data = self.train_data.pin_memory().to(config.device, non_blocking=True)
+		# 	self.test_data = self.train_data.pin_memory().to(config.device, non_blocking=True)
 
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
@@ -78,7 +79,7 @@ class Data:
 		ix = torch.randint(len(data) - (self.block_size + 1), (batch_size,))
 		x = torch.stack([data[i:i + self.block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + self.block_size + 1] for i in ix])
-		return x, y
+		return x.to(config.device), y.to(config.device)
 
 
 # From llama
@@ -98,49 +99,49 @@ class RMSNorm(nn.Module):
 
 
 # From nanoGPT
-class CausalSelfAttention(nn.Module):
-	def __init__(self, idx: int):
-		super().__init__()
-		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
-		self.dim = config.embeds_size
-		config.head_size = self.dim // config.num_heads
-		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=False)
-		self.c_proj = nn.Linear(self.dim, self.dim, bias=False)
-		self.attn_dropout = nn.Dropout(config.dropout)
-		self.resid_dropout = nn.Dropout(config.dropout)
-		self.n_head = config.num_heads
-		self.dropout = config.dropout
-		self.flash = config.flash_attention and hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-		if not self.flash:
-			self.register_buffer('bias', torch.tril(torch.ones(config.block_size, config.block_size))
-										.view(1, 1, config.block_size, config.block_size))
+# class CausalSelfAttention(nn.Module):
+# 	def __init__(self, idx: int):
+# 		super().__init__()
+# 		assert config.embeds_size % config.num_heads == 0, 'embeds size is not divisible to the num_heads'
+# 		self.dim = config.embeds_size
+# 		config.head_size = self.dim // config.num_heads
+# 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=False)
+# 		self.c_proj = nn.Linear(self.dim, self.dim, bias=False)
+# 		self.attn_dropout = nn.Dropout(config.dropout)
+# 		self.resid_dropout = nn.Dropout(config.dropout)
+# 		self.n_head = config.num_heads
+# 		self.dropout = config.dropout
+# 		self.flash = config.flash_attention and hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+# 		if not self.flash:
+# 			self.register_buffer('bias', torch.tril(torch.ones(config.block_size, config.block_size))
+# 										.view(1, 1, config.block_size, config.block_size))
 
-	def forward(self, x):
-		B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+# 	def forward(self, x):
+# 		B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-		# calculate query, key, values for all heads in batch and move head forward to be the batch dim
-		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
-		k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-		q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-		v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-		if self.flash:
-			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-				attn_mask=None,
-				dropout_p=self.dropout if self.training else 0,
-				is_causal=True,
-			)
-		else:
-			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-			att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-			att = F.softmax(att, dim=-1)
-			# att = self.attn_dropout(att) # NOTE: my preference. it causes values of early tokens nan
-			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
+# 		# calculate query, key, values for all heads in batch and move head forward to be the batch dim
+# 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+# 		k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+# 		q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+# 		v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+# 		if self.flash:
+# 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v,
+# 				attn_mask=None,
+# 				dropout_p=self.dropout if self.training else 0,
+# 				is_causal=True,
+# 			)
+# 		else:
+# 			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+# 			att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+# 			att = F.softmax(att, dim=-1)
+# 			# att = self.attn_dropout(att) # NOTE: my preference. it causes values of early tokens nan
+# 			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
 		
-		y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+# 		y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
-		# output projection
-		y = self.resid_dropout(self.c_proj(y))
-		return y
+# 		# output projection
+# 		y = self.resid_dropout(self.c_proj(y))
+# 		return y
 
 
 class NonLinear(nn.Module):
@@ -177,7 +178,7 @@ class Block(nn.Module):
 		self.resid_dropout = nn.Dropout(self.dropout)
 		self.block_drop = nn.Dropout(self.dropout)
 		# self.n_groups = int(config.block_size ** 0.5)
-		self.n_groups = 2
+		self.n_groups = 4
 		self.per_group = (config.block_size // self.n_groups)
 		self.odd_even = self.n_layers % 2
 		self.ffn = NonLinear()
@@ -290,19 +291,19 @@ class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
 		super().__init__()
 		self.dim = config.embeds_size
-		self.pad = 8
-		self.eps_dim = self.pad * 4
+		# self.pad = 8
+		# self.eps_dim = self.pad * 4
 		self.stack = nn.ModuleDict(dict(
-			tok_embs=nn.Embedding(config.vocab_size, self.dim - self.eps_dim),
-			pos_embs=nn.Embedding(config.block_size, self.dim - self.eps_dim),
-			eps_tok_embs=nn.Embedding(config.vocab_size + 1, 4),
-			eps_pos_embs=nn.Embedding(config.block_size, 4),
+			tok_embs=nn.Embedding(config.vocab_size, self.dim),
+			pos_embs=nn.Embedding(config.block_size, self.dim),
+			# eps_tok_embs=nn.Embedding(config.vocab_size + 1, 4),
+			# eps_pos_embs=nn.Embedding(config.block_size, 4),
 			dropout=nn.Dropout(config.dropout),
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
 		self.blocks = nn.ModuleList([Block(idx) for idx in range(config.num_layers)])
-		# self.stack.tok_embs.weight = self.stack.lm_head.weight
+		self.stack.tok_embs.weight = self.stack.lm_head.weight
 		self.apply(self.norm_weights)
 		self.count_params = self.num_params() / 1e6
 		config.parameters = self.count_params
@@ -369,18 +370,18 @@ class Transformer(nn.Module):
 		arange = torch.arange(T, device=seq.device)
 		pos_emb = self.stack.pos_embs(arange)
 
-		xseq = F.pad(seq + 1, (self.pad, 0)).unfold(1, self.pad, 1)[:,:-1,:]
-		bseq = F.pad(arange, (self.pad, 0)).unfold(0, self.pad, 1)[1:,:]
-		eps_embs = self.stack.eps_tok_embs(xseq)
-		eps_pos_embs = self.stack.eps_pos_embs(bseq)
-		eps_embs = eps_embs + eps_pos_embs
+		# xseq = F.pad(seq + 1, (self.pad, 0)).unfold(1, self.pad, 1)[:,:-1,:]
+		# bseq = F.pad(arange, (self.pad, 0)).unfold(0, self.pad, 1)[1:,:]
+		# eps_embs = self.stack.eps_tok_embs(xseq)
+		# eps_pos_embs = self.stack.eps_pos_embs(bseq)
+		# eps_embs = eps_embs + eps_pos_embs
 		# eps_comb = torch.cat([
 		# 	eps_embs.view(B, T, -1),
 		# 	eps_pos_embs.view(1, T, -1).expand(B, T, -1)],
 		# 	dim=-1,
 		# )
-		x = torch.cat([tok_emb + pos_emb, eps_embs.view(B, T, -1)], dim=-1)
-		# x = tok_emb + pos_emb
+		# x = torch.cat([tok_emb + pos_emb, eps_embs.view(B, T, -1)], dim=-1)
+		x = tok_emb + pos_emb
 		x = self.stack.dropout(x)
 		y = None
 		for block in self.blocks:
@@ -403,6 +404,8 @@ class Transformer(nn.Module):
 	def autocomplete(self, 
 		idx: Tensor,
 		_len: int = 10,
+		temperature = 1.0,
+		top_k = 4,
 	) -> Tensor:
 		'''
 			Given a sequence, it autoregressively predicts the next token
@@ -424,6 +427,11 @@ class Transformer(nn.Module):
 			idx_cond = idx[:, -bsize:] # crop it
 			with config.autocast:
 				logits, _ = self(idx_cond)
+			logits = logits / temperature
+			# optionally crop the logits to only the top k options
+			if top_k is not None:
+				v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+				logits[logits < v[:, [-1]]] = -float('Inf')
 			# logits = logits[:, -1, :] # only care about the last logit
 			probs = F.softmax(logits, dim=-1) # view is for arch twelve
 			# It selects samples from probs. The higher the prob, the more the chance of being selected
