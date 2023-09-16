@@ -427,12 +427,11 @@ class Transformer(nn.Module):
 			idx_cond = idx[:, -bsize:] # crop it
 			with config.autocast:
 				logits, _ = self(idx_cond)
-			logits = logits / temperature
+			logits = logits[:, -1, :] / temperature
 			# optionally crop the logits to only the top k options
 			if top_k is not None:
 				v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
 				logits[logits < v[:, [-1]]] = -float('Inf')
-			# logits = logits[:, -1, :] # only care about the last logit
 			probs = F.softmax(logits, dim=-1) # view is for arch twelve
 			# It selects samples from probs. The higher the prob, the more the chance of being selected
 			next_idx = torch.multinomial(probs, num_samples=1) # (B, 1) one prediction for each batch
