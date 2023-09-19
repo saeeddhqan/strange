@@ -44,7 +44,7 @@ def get_lr(epoch, warmup_iters=2000, lr_decay_iters=3250, min_lr=1e-4, lr=1e-3):
 
 set_seed(1244)
 block_size = 64
-embeds_size = 128
+dim = 128
 params = {
 	'block_size': block_size, # It needs to be 256 for bench.
 	'lr': 5e-4, # Learning rate
@@ -57,10 +57,10 @@ params = {
 	'iterations': 5000, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
 	'batch_size': 64,
-	'num_layers': 2,
-	'num_heads': 4,
+	'nlayers': 2,
+	'nheads': 4,
 	'dropout': 0.1,
-	'embeds_size': embeds_size,
+	'dim': dim,
 	'weight_decay': 0.001,
 	'stop_loss': 1.4, # When can we stop training? once the stop_loss is <= n and once epochs are done.
 	'vocab_size': 0,
@@ -81,6 +81,9 @@ params = {
 	'autocast': None,
 	'flash_attention': True,
 	'bias': False,
+	'deepnorm': False,
+	'init_weight': 'xavier',
+	'topk': -1,
 	'lw_lr': False,
 	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
 	'layers_health': [],
@@ -96,6 +99,7 @@ def after_conf_init():
 		config.dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else config.dtype
 	ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
 	config.autocast = nullcontext() if config.device == 'cpu' else torch.amp.autocast(device_type=config.device, dtype=ptdtype)
+	config.topk = None if config.topk <= 0 else config.topk
 
 
 class Config:
@@ -172,8 +176,7 @@ class Config:
 				'wandb', 'tensorboard', 'details', 'data_file',
 				'variation', 'device', 'mode', 'autocast',
 				'healthcare', 'flash_attention', 'compile',
-				'layers_health', 'layer_wise_lr'
-
+				'layers_health', 'layer_wise_lr', 'init_weight',
 			)
 		else:
 			filters = ('data_load', 'load', 'iterations', 'autocast', 'layers_health', 'layer_wise_lr')
@@ -316,7 +319,7 @@ class ManageModel:
 		if self.optimizer is None:
 			use_fused = config.device == 'cuda'
 			if config.lw_lr:
-				learning_rates = config.layer_wise_lr(config.lr, config.num_layers, config.lw_lr_factor)
+				learning_rates = config.layer_wise_lr(config.lr, config.nlayers, config.lw_lr_factor)
 				learning_rates.reverse()
 				params = [{'params': self.model.stack.parameters(), 'lr': config.lr}]
 				params_layers = [
@@ -324,7 +327,7 @@ class ManageModel:
 						'params': self.model.blocks[x].parameters(),
 						'lr': learning_rates[x],
 					}
-					for x in range(config.num_layers)
+					for x in range(config.nlayers)
 				]
 				params.extend(params_layers)
 
@@ -339,7 +342,7 @@ class ManageModel:
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
 				comment='_' + config.variation,
-				filename_suffix=''
+				filename_suffix='',
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
@@ -458,6 +461,7 @@ class ManageModel:
 				'iter': epoch,
 			})
 		config.mode = state
+		# print(self.model.stack.pos_embs(torch.tensor([0, 1]).to(config.device))[:20])
 
 	def train_chunk(self, epoch: int) -> float:
 		'''
@@ -481,7 +485,7 @@ class ManageModel:
 				min_lr=config.min_lr,
 			)
 			if config.lw_lr:
-				learning_rates = config.layer_wise_lr(lr, config.num_layers, config.lw_lr_factor)
+				learning_rates = config.layer_wise_lr(lr, config.nlayers, config.lw_lr_factor)
 				learning_rates.reverse()
 				self.optimizer.param_groups[0]['lr'] = lr
 				for x, param_groups in enumerate(self.optimizer.param_groups[1:]):
@@ -493,7 +497,7 @@ class ManageModel:
 		lr = config.lr if not config.decay_lr else lr
 
 		if config.health > 0:
-			config.layers_health = [{} for _ in range(config.num_layers)]
+			config.layers_health = [{} for _ in range(config.nlayers)]
 
 		X, y = config.data_load.get_batch(epoch)
 		start = time.time()
@@ -595,7 +599,8 @@ class ManageModel:
 
 		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
 		start = time.time()
-		generated = self.model.autocomplete(X, seq_len)
+		with config.autocast:
+			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
 		end = time.time()
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
@@ -615,22 +620,24 @@ if __name__ == '__main__':
 	parser.add_argument('--load', type=str, default=config.load, help='path to a model to start with')
 	parser.add_argument('--data-file', type=str, default=config.data_file, help=f"input data file, default {config.data_file}")
 	parser.add_argument('--variation', '-v', type=str, default=config.variation, help=f"model variation, default {config.variation}")
-	parser.add_argument('--details', '-d', type=str, help=f"model details, default {config.details}")
+	parser.add_argument('--details', type=str, help=f"model details, default {config.details}")
 	parser.add_argument('--iterations', '-i', type=int, default=config.iterations, help=f"number of training iterations, default {config.iterations}")
 	parser.add_argument('--lr', '-lr', type=float, default=config.lr, help=f"learning rate, default {config.lr}")
 	parser.add_argument('--min-lr', '-ml', type=float, default=config.min_lr, help=f"minimum learning rate, default {config.min_lr}")
 	parser.add_argument('--dropout', '-do', type=float, default=config.dropout, help=f"dropout prob, default {config.dropout}")
-	parser.add_argument('--num-layers', '-nl', type=int, default=config.num_layers, help=f"number of blocks, default {config.num_layers}")
-	parser.add_argument('--num-heads', '-nh', type=int, default=config.num_heads, help=f"number of heads, default {config.num_heads}")
-	parser.add_argument('--embeds-size', '-es', type=int, default=config.embeds_size, help=f"embedding size, default {config.embeds_size}")
+	parser.add_argument('--nlayers', '-nl', type=int, default=config.nlayers, help=f"number of blocks, default {config.nlayers}")
+	parser.add_argument('--num-heads', '-nh', type=int, default=config.nheads, help=f"number of heads, default {config.nheads}")
+	parser.add_argument('--dim', '-d', type=int, default=config.dim, help=f"embedding size, default {config.dim}")
 	parser.add_argument('--block-size', '-bs', type=int, default=config.block_size, help=f"length input sequence, default {config.block_size}")
 	parser.add_argument('--batch-size', '-b', type=int, default=config.batch_size, help=f"batch size, default {config.batch_size}")
 	parser.add_argument('--health', type=int, default=config.health, help=f"1 for logging vector's norm, 2 for 1 + gradient and weight norm, default {config.health}")
+	parser.add_argument('--topk', type=int, default=config.topk, help=f"topk sampling, default {config.topk}")
 	parser.add_argument('--stop-loss', type=float, default=config.stop_loss, help=f"training stops when test loss is <= a treshold, default {config.stop_loss}")
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help=f"use wandb for visualization, default {config.wandb}")
 	parser.add_argument('--tensorboard', action='store_true', default=config.tensorboard, help=f"use tensorboard for visualization, default {config.tensorboard}")
-	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"Compile the model for faster training, default {config.compile}")
+	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"compile the model for faster training, default {config.compile}")
 	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"weigth decay, default {config.decay_lr}")
+	parser.add_argument('--deepnorm', action='store_true', default=config.deepnorm, help=f"use deep layer normalizer, default {config.deepnorm}")
 	args = parser.parse_args()
 
 	config.set_args(args)

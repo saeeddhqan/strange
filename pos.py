@@ -30,7 +30,7 @@ class Data:
 		self.test_data = data[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
-
+		self.arange = torch.arange(config.block_size).view(1, -1).expand(config.batch_size).to(config.device)
 	def __len__(self):
 		return self.vocab_size
 
@@ -44,7 +44,7 @@ class Data:
 		ix = torch.randint(len(data) - (self.block_size + 1), (batch_size,))
 		x = torch.stack([data[i:i + self.block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + self.block_size + 1] for i in ix])
-		return x, y
+		return x, self.arange
 
 
 class RMSNorm(nn.Module):
@@ -237,7 +237,7 @@ class Block(nn.Module):
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
 		self.ln3 = RMSNorm(self.head_size)
-		self.causal_self_attention = CausalSelfAttention(self.idx)
+		self.causal_self_attention = CausalSelfAttention2(self.idx)
 
 
 	def forward(self, 
@@ -249,8 +249,8 @@ class Block(nn.Module):
 		if y is not None:
 			y = self.block_drop(y[0]), self.block_drop(y[1]), self.block_drop(y[2])
 			y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
-		# head_out, y = self.causal_self_attention(self.ln1(x), y)
-		head_out = self.causal_self_attention(self.ln1(x))
+		head_out, y = self.causal_self_attention(self.ln1(x), y)
+		# head_out = self.causal_self_attention(self.ln1(x))
 		res_con = x + head_out
 		hidden_state = res_con + self.ffn(self.ln2(res_con)) # NOTE: 
 
@@ -265,7 +265,7 @@ class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
 		super().__init__()
 		self.dim = config.dim
-		self.pos_win = 32
+		self.pos_win = 64
 		self.dim_snip = self.dim // self.pos_win
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
@@ -338,7 +338,6 @@ class Transformer(nn.Module):
 		tok_emb = self.stack.tok_embs(seq) # (batch, block_size, embed_dim) (B,T,C)
 		snip = tok_emb[:,:,:self.dim_snip].flatten(1)
 		snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0)
-
 		pos_emb = snip_pad.unfold(1, self.dim, self.dim_snip)
 
 		x = tok_emb + pos_emb
