@@ -13,7 +13,7 @@ import wandb
 import argparse
 import time
 import random
-import model
+import pos as model
 import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
@@ -267,18 +267,18 @@ class ManageModel:
 		for i, layer in enumerate(config.layers_health):
 			for k, v in layer.items():
 				if config.tensorboard:
-					self.tensorboard_writer.add_scalar(f"layers.{i}.{k}", v, epoch, new_style=True)
+					self.tensorboard_writer.add_scalar(f"health/layers.{i}.{k}", v, epoch, new_style=True)
 				if config.wandb:
 					wandb.log({
-						f"layers.{i}.{k}": v,
+						f"health/layers.{i}.{k}": v,
 					})
 
 		if config.health > 1:
 			if config.tensorboard and config.decay_lr:
-				self.tensorboard_writer.add_scalar('lr', lr, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar('health/lr', lr, epoch, new_style=True)
 			if config.wandb:
 				wandb.log({
-					'lr': lr,
+					'health/lr': lr,
 				})
 
 			for name, param in self.model.named_parameters():
@@ -286,18 +286,18 @@ class ManageModel:
 				weight_norm = None if 'weight' not in name else param.norm(2).item()
 				if config.tensorboard:
 					if grad_norm is not None:
-						self.tensorboard_writer.add_scalar(f"{name}.gradient.norm", grad_norm, epoch, new_style=True)
+						self.tensorboard_writer.add_scalar(f"health/{name}.gradient.norm", grad_norm, epoch, new_style=True)
 					if weight_norm is not None:
-						self.tensorboard_writer.add_scalar(f"{name}.weight.norm", weight_norm, epoch, new_style=True)
+						self.tensorboard_writer.add_scalar(f"health/{name}.weight.norm", weight_norm, epoch, new_style=True)
 
 				if config.wandb:
 					if grad_norm is not None:
 						wandb.log({
-							f"{name}.gradient.norm": grad_norm,
+							f"health/{name}.gradient.norm": grad_norm,
 						})
 					if weight_norm is not None:
 						wandb.log({
-							f"{name}.gradient.norm": weight_norm,
+							f"health/{name}.gradient.norm": weight_norm,
 						})
 
 
@@ -379,7 +379,7 @@ class ManageModel:
 			metrics = {}
 			hyparams['test_loss'] = self.loss['test'].item()
 			hyparams['train_loss'] = self.loss['train'].item()
-			hyparams['elapsed_time'] = round(self.elapsed_time / 60, 4) # M
+			hyparams['elapsed_time'] = round(self.elapsed_time / 60, 4)
 			hyparams['parameters'] = config.parameters
 			for i in hyparams:
 				self.tensorboard_writer.add_text(i, str(hyparams[i]))
@@ -388,7 +388,7 @@ class ManageModel:
 		if config.wandb:
 			wandb.log({
 				'params': config.parameters,
-				'elapsed_time': round(self.elapsed_time / 60, 4) # M
+				'elapsed_time': round(self.elapsed_time / 60, 4)
 			})
 
 
@@ -397,7 +397,7 @@ class ManageModel:
 
 
 	@torch.no_grad()
-	def calculate_loss(self) -> dict[str, int]:
+	def calculate_loss(self, length) -> dict[str, int]:
 		'''
 			We select eval_iterations chunks from both train and test data
 			and save their losses. All in all, evaluating the perf
@@ -418,7 +418,7 @@ class ManageModel:
 			# A tensor to capture the losses
 			losses = torch.zeros(config.eval_iterations)
 			for k in range(config.eval_iterations):
-				X, y = config.data_load.get_batch(0, split)
+				X, y = config.data_load.get_batch(0, split, block_size=length)
 				with config.autocast:
 					_, loss = self.model(X, y)
 				losses[k] = loss.item()
@@ -445,21 +445,22 @@ class ManageModel:
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
-		self.loss = self.calculate_loss()
-		test_loss = round(self.loss['test'].item(), 4)
-		train_loss = round(self.loss['train'].item(), 4)
-		print(f"[{epoch}] > train: {train_loss}, test: {test_loss}")
-		print('-' * 30)
-		if config.tensorboard:
-			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
-			self.tensorboard_writer.flush()
-		if config.wandb:
-			wandb.log({
-				'train_loss': train_loss,
-				'test_loss': test_loss,
-				'iter': epoch,
-			})
+		for i in range(3):
+			self.loss = self.calculate_loss(config.block_size + (16 * i))
+			test_loss = round(self.loss['test'].item(), 4)
+			train_loss = round(self.loss['train'].item(), 4)
+			print(f"[{epoch}][{config.block_size + (16 * i)}] > train: {train_loss}, test: {test_loss}")
+			print('-' * 30)
+			if config.tensorboard:
+				self.tensorboard_writer.add_scalar(f'train_loss_{i}', train_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'test_loss_{i}', test_loss, epoch, new_style=True)
+				self.tensorboard_writer.flush()
+			if config.wandb:
+				wandb.log({
+					'train_loss': train_loss,
+					'test_loss': test_loss,
+					'iter': epoch,
+				})
 		config.mode = state
 		# print(self.model.stack.pos_embs(torch.tensor([0, 1]).to(config.device))[:20])
 
