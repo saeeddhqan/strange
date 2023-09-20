@@ -350,8 +350,15 @@ class Transformer(nn.Module):
 		x = self.stack.dropout(x)
 		y = None
 
-		for block in self.blocks:
+		for i, block in enumerate(self.blocks):
+			if (
+				# i == config.nlayers - 1
+				torch.rand(1).item() < 0.1
+				and self.training
+			):
+				continue
 			x, y = block(x, y)
+
 
 		if targets is None:
 			x = x[:,-1]
