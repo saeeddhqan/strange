@@ -124,17 +124,17 @@ class CausalSelfAttention2(nn.Module):
 		self.dropout = config.dropout
 		self.resid_dropout = nn.Dropout(self.dropout)
 		self.block_drop = nn.Dropout(self.dropout)
-		self.n_groups = int(config.block_size ** 0.5)
-		# self.n_groups = 2
+		# self.n_groups = int(config.block_size ** 0.5)
+		self.n_groups = 32
 		self.per_group = (config.block_size // self.n_groups)
 		self.odd_even = config.nlayers % 2
 		self.flash = config.flash_attention
 
-	def do_att(self, q, k, v):
+	def do_att(self, q, k, v, g=False):
 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 				attn_mask=None,
-				dropout_p=0,
-				# dropout_p=config.dropout if self.training else 0,
+				# dropout_p=0,
+				dropout_p=config.dropout if (self.training and not g) else 0,
 				is_causal=True,
 			)
 
@@ -195,6 +195,7 @@ class CausalSelfAttention2(nn.Module):
 				q,
 				k,
 				x[:,:,:-1,-1:].view(B, self.n_heads, -1, self.head_size),
+                g=True,
 			).unsqueeze(3)
 			y = (q.unsqueeze(3), k.unsqueeze(3), v)
 			x = x[:,:,:,:-1] # crop footprints(blocks)
@@ -250,7 +251,7 @@ class Block(nn.Module):
 
 		if y is not None:
 			y = self.block_drop(y[0]), self.block_drop(y[1]), self.block_drop(y[2])
-			y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
+			# y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
 		head_out, y = self.causal_self_attention(self.ln1(x), y)
 		# head_out = self.causal_self_attention(self.ln1(x))
 		res_con = x + head_out
@@ -267,12 +268,13 @@ class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
 		super().__init__()
 		self.dim = config.dim
-		self.pos_win = int(config.block_size ** 0.5)
+		self.pos_win = 12
 		self.dim_snip = self.dim // self.pos_win
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
-			# pos_embs=nn.Embedding(config.block_size, self.dim),
+			pos_embs=nn.Embedding(config.block_size, self.dim),
 			dropout=nn.Dropout(config.dropout),
+			dropout_pos=nn.Dropout(0.6),
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
@@ -340,7 +342,7 @@ class Transformer(nn.Module):
 		tok_emb = self.stack.tok_embs(seq) # (batch, block_size, embed_dim) (B,T,C)
 		snip = tok_emb[:,:,:self.dim_snip].flatten(1)
 		snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0)
-		pos_emb = snip_pad.unfold(1, self.dim, self.dim_snip)
+		pos_emb = self.stack.dropout_pos(snip_pad.unfold(1, self.dim, self.dim_snip))
 
 		# arange = torch.arange(T, device=seq.device)
 		# pos_emb = self.stack.pos_embs(arange)
@@ -351,12 +353,12 @@ class Transformer(nn.Module):
 		y = None
 
 		for i, block in enumerate(self.blocks):
-			if (
-				# i == config.nlayers - 1
-				torch.rand(1).item() < 0.1
-				and self.training
-			):
-				continue
+			# if (
+			# 	i == config.nlayers-1
+			# 	and torch.rand(1).item() < 0.1
+			# 	and self.training
+			# ):
+			# 	continue
 			x, y = block(x, y)
 
 
