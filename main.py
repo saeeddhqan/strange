@@ -13,7 +13,7 @@ import wandb
 import argparse
 import time
 import random
-import pos as model
+import model
 import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
@@ -48,8 +48,7 @@ dim = 128
 params = {
 	'block_size': block_size, # It needs to be 256 for bench.
 	'lr': 5e-4, # Learning rate
-	'min_lr': 6e-5, # Min earning rate
-	'lw_lr_factor': 0.05, # Layer-wise learning rate factor for increasing lr 
+	'min_lr': 6e-5, # Min learning rate
 	'beta1': 0.9,
 	'beta2': 0.99,
 	'decay_lr': False,
@@ -65,7 +64,7 @@ params = {
 	'stop_loss': 1.4, # When can we stop training? once the stop_loss is <= n and once epochs are done.
 	'vocab_size': 0,
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-	'variation': 'stable', # When we change something, change it to distinguish different variations.
+	'variation': 'stable', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
 	'data_file': 'data/shakespeare.txt',
 	'load': '',
@@ -84,10 +83,8 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'lw_lr': False,
 	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
 	'layers_health': [],
-	'layer_wise_lr': lambda lr, nl, factor: [lr * max(1, x * (1 + factor)) for x in range(nl)]
 }
 
 # From nanoGPT
@@ -255,8 +252,7 @@ class ManageModel:
 
 	def net_health(self, epoch: int, lr: float) -> NoReturn:
 		'''
-			Logging more information about the vectors, weights, 
-			and one day gradients. Needs to be run after each iter.
+			Gradients. Needs to be run after each iter.
 			Parameters
 			----------
 			epoch: int
@@ -264,47 +260,10 @@ class ManageModel:
 			lr: float
 				current learning rate
 		'''
-		for i, layer in enumerate(config.layers_health):
-			for k, v in layer.items():
-				if config.tensorboard:
-					self.tensorboard_writer.add_scalar(f"health/layers.{i}.{k}", v, epoch, new_style=True)
-				if config.wandb:
-					wandb.log({
-						f"health/layers.{i}.{k}": v,
-					})
-
-		if config.health > 1:
-			if config.tensorboard and config.decay_lr:
-				self.tensorboard_writer.add_scalar('health/lr', lr, epoch, new_style=True)
-			if config.wandb:
-				wandb.log({
-					'health/lr': lr,
-				})
-
-			for name, param in self.model.named_parameters():
-				grad_norm = None if param.grad is None else param.grad.data.norm(2).item()
-				weight_norm = None if 'weight' not in name else param.norm(2).item()
-				if config.tensorboard:
-					if grad_norm is not None:
-						self.tensorboard_writer.add_scalar(f"health/{name}.gradient.norm", grad_norm, epoch, new_style=True)
-					if weight_norm is not None:
-						self.tensorboard_writer.add_scalar(f"health/{name}.weight.norm", weight_norm, epoch, new_style=True)
-
-				if config.wandb:
-					if grad_norm is not None:
-						wandb.log({
-							f"health/{name}.gradient.norm": grad_norm,
-						})
-					if weight_norm is not None:
-						wandb.log({
-							f"health/{name}.gradient.norm": weight_norm,
-						})
-
-
-
-		config.layers_health = []
-
 		if config.tensorboard:
+			for name, param in self.model.named_parameters():
+				if param.grad is not None:
+					self.tensorboard_writer.add_histogram(name + '/grad', param.grad, global_step=epoch)
 			self.tensorboard_writer.flush()
 
 
@@ -318,21 +277,9 @@ class ManageModel:
 
 		if self.optimizer is None:
 			use_fused = config.device == 'cuda'
-			if config.lw_lr:
-				learning_rates = config.layer_wise_lr(config.lr, config.nlayers, config.lw_lr_factor)
-				learning_rates.reverse()
-				params = [{'params': self.model.stack.parameters(), 'lr': config.lr}]
-				params_layers = [
-					{
-						'params': self.model.blocks[x].parameters(),
-						'lr': learning_rates[x],
-					}
-					for x in range(config.nlayers)
-				]
-				params.extend(params_layers)
 
 			self.optimizer = torch.optim.AdamW(
-				self.model.parameters() if not config.lw_lr else params,
+				self.model.parameters(),
 				lr=config.lr,
 				# amsgrad=True, # Found amsgrad better.
 				# betas=(config.beta1, config.beta2),
@@ -356,7 +303,7 @@ class ManageModel:
 		)
 
 		if config.wandb:
-			self.wandb_init.watch(self.model)
+			self.wandb_init.watch(self.model, log='all')
 
 		os.makedirs(config.workdir, exist_ok=True)
 
@@ -387,8 +334,8 @@ class ManageModel:
 			self.tensorboard_writer.close()
 		if config.wandb:
 			wandb.log({
-				'params': config.parameters,
-				'elapsed_time': round(self.elapsed_time / 60, 4)
+				'meta/params': config.parameters,
+				'meta/elapsed_time': round(self.elapsed_time / 60, 4)
 			})
 
 
@@ -397,7 +344,7 @@ class ManageModel:
 
 
 	@torch.no_grad()
-	def calculate_loss(self, length) -> dict[str, int]:
+	def calculate_loss(self, length: int) -> dict[str, int]:
 		'''
 			We select eval_iterations chunks from both train and test data
 			and save their losses. All in all, evaluating the perf
@@ -445,24 +392,23 @@ class ManageModel:
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
-		for i in range(3):
-			self.loss = self.calculate_loss(config.block_size + (16 * i))
-			test_loss = round(self.loss['test'].item(), 4)
-			train_loss = round(self.loss['train'].item(), 4)
-			print(f"[{epoch}][{config.block_size + (16 * i)}] > train: {train_loss}, test: {test_loss}")
-			print('-' * 30)
-			if config.tensorboard:
-				self.tensorboard_writer.add_scalar(f'train_loss_{i}', train_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'test_loss_{i}', test_loss, epoch, new_style=True)
-				self.tensorboard_writer.flush()
-			if config.wandb:
-				wandb.log({
-					'train_loss': train_loss,
-					'test_loss': test_loss,
-					'iter': epoch,
-				})
+		self.loss = self.calculate_loss(config.block_size)
+		test_loss = round(self.loss['test'].item(), 4)
+		train_loss = round(self.loss['train'].item(), 4)
+		print(f"[{epoch}] > train: {train_loss}, test: {test_loss}")
+		print('-' * 30)
+		if config.tensorboard:
+			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
+			self.tensorboard_writer.flush()
+		if config.wandb:
+			wandb.log({
+				'train/loss': train_loss,
+				'test/loss': test_loss,
+				'iter': epoch,
+			})
 		config.mode = state
-		# print(self.model.stack.pos_embs(torch.tensor([0, 1]).to(config.device))[:20])
+
 
 	def train_chunk(self, epoch: int) -> float:
 		'''
@@ -485,15 +431,9 @@ class ManageModel:
 				lr=config.lr,
 				min_lr=config.min_lr,
 			)
-			if config.lw_lr:
-				learning_rates = config.layer_wise_lr(lr, config.nlayers, config.lw_lr_factor)
-				learning_rates.reverse()
-				self.optimizer.param_groups[0]['lr'] = lr
-				for x, param_groups in enumerate(self.optimizer.param_groups[1:]):
-					param_groups['lr'] = learning_rates[x]
-			else:
-				for param_group in self.optimizer.param_groups:
-					param_group['lr'] = lr
+
+			for param_group in self.optimizer.param_groups:
+				param_group['lr'] = lr
 
 		lr = config.lr if not config.decay_lr else lr
 
@@ -516,6 +456,7 @@ class ManageModel:
 		self.elapsed_time += stop - start
 
 		if config.health > 0:
+
 			self.net_health(epoch, lr)
 
 

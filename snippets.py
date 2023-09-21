@@ -22,3 +22,32 @@
 		# for i in range(config.num_layers):
 			# idx = (rotate + i) % config.num_layers
 			# x = self.stack.blocks[idx](x)
+
+# layer skipper:
+			# if (
+			# 	i == config.nlayers-1
+			# 	and torch.rand(1).item() < 0.1
+			# 	and self.training
+			# ):
+			# 	continue
+# layer wise lr:
+			# if config.lw_lr:
+			# 	learning_rates = config.layer_wise_lr(config.lr, config.nlayers, config.lw_lr_factor)
+			# 	learning_rates.reverse()
+			# 	params = [{'params': self.model.stack.parameters(), 'lr': config.lr}]
+			# 	params_layers = [
+			# 		{
+			# 			'params': self.model.blocks[x].parameters(),
+			# 			'lr': learning_rates[x],
+			# 		}
+			# 		for x in range(config.nlayers)
+			# 	]
+			# 	params.extend(params_layers)
+
+			# self.optimizer = torch.optim.AdamW(
+			# 	self.model.parameters() if not config.lw_lr else params,
+			# 	lr=config.lr,
+			# 	# amsgrad=True, # Found amsgrad better.
+			# 	# betas=(config.beta1, config.beta2),
+			# 	fused=use_fused,
+			# )
