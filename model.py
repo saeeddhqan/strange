@@ -30,20 +30,22 @@ class Data:
 		self.test_data = data[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
+		# self.arange = torch.arange(config.block_size).view(1, -1).expand(config.batch_size, -1).to(config.device)
 
 	def __len__(self):
 		return self.vocab_size
 
-
 	def get_batch(self, 
 		idx: int, split: str = 'train',
+		block_size = None,
 		batch_size: int = -1,
 	) -> tuple[Tensor, Tensor]:
+		block_size = self.block_size if block_size is None else block_size
 		data = self.train_data if split == 'train' else self.test_data
 		batch_size = self.batch_size if batch_size == -1 else batch_size
-		ix = torch.randint(len(data) - (self.block_size + 1), (batch_size,))
-		x = torch.stack([data[i:i + self.block_size] for i in ix])
-		y = torch.stack([data[i + 1:i + self.block_size + 1] for i in ix])
+		ix = torch.randint(len(data) - (block_size + 1), (batch_size,))
+		x = torch.stack([data[i:i + block_size] for i in ix])
+		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
 		return x, y
 
 
@@ -123,16 +125,16 @@ class CausalSelfAttention2(nn.Module):
 		self.resid_dropout = nn.Dropout(self.dropout)
 		self.block_drop = nn.Dropout(self.dropout)
 		# self.n_groups = int(config.block_size ** 0.5)
-		self.n_groups = 2
+		self.n_groups = 32
 		self.per_group = (config.block_size // self.n_groups)
 		self.odd_even = config.nlayers % 2
 		self.flash = config.flash_attention
 
-	def do_att(self, q, k, v):
+	def do_att(self, q, k, v, g=False):
 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 				attn_mask=None,
-				dropout_p=0,
-				# dropout_p=config.dropout if self.training else 0,
+				# dropout_p=0,
+				dropout_p=config.dropout if (self.training and not g) else 0,
 				is_causal=True,
 			)
 
@@ -157,7 +159,7 @@ class CausalSelfAttention2(nn.Module):
 			remain = self.per_group - (T % self.per_group) 
 			comp = remain * self.dim
 			T = T + remain
-			pad = torch.zeros(B, remain, embeds_size).to(x.device)
+			pad = torch.zeros(B, remain, q.size(2)).to(x.device)
 			q = torch.cat((q, pad), dim=1)
 			k = torch.cat((k, pad), dim=1)
 			v = torch.cat((v, pad), dim=1)
@@ -193,6 +195,7 @@ class CausalSelfAttention2(nn.Module):
 				q,
 				k,
 				x[:,:,:-1,-1:].view(B, self.n_heads, -1, self.head_size),
+                g=True,
 			).unsqueeze(3)
 			y = (q.unsqueeze(3), k.unsqueeze(3), v)
 			x = x[:,:,:,:-1] # crop footprints(blocks)
@@ -237,10 +240,10 @@ class Block(nn.Module):
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
 		self.ln3 = RMSNorm(self.head_size)
-		self.causal_self_attention = CausalSelfAttention(self.idx)
+		self.causal_self_attention = CausalSelfAttention2(self.idx)
 
 
-	def forward(self, 
+	def forward(self,
 		x: Tensor, y:
 		Union[Tensor, None] = None
 	):
@@ -248,11 +251,11 @@ class Block(nn.Module):
 
 		if y is not None:
 			y = self.block_drop(y[0]), self.block_drop(y[1]), self.block_drop(y[2])
-			y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
-		# head_out, y = self.causal_self_attention(self.ln1(x), y)
-		head_out = self.causal_self_attention(self.ln1(x))
+			# y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
+		head_out, y = self.causal_self_attention(self.ln1(x), y)
+		# head_out = self.causal_self_attention(self.ln1(x))
 		res_con = x + head_out
-		hidden_state = res_con + self.ffn(self.ln2(res_con)) # NOTE: 
+		hidden_state = res_con + self.ffn(self.ln2(res_con)) # NOTE:
 
 		if config.health > 0 and config.mode == 'train':
 			config.layers_health[self.idx]['pre_layer'] = x.norm(2).item()
@@ -265,12 +268,13 @@ class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
 		super().__init__()
 		self.dim = config.dim
-		self.pos_win = 32
+		self.pos_win = 12
 		self.dim_snip = self.dim // self.pos_win
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
-			# pos_embs=nn.Embedding(config.block_size, self.dim),
+			pos_embs=nn.Embedding(config.block_size, self.dim),
 			dropout=nn.Dropout(config.dropout),
+			dropout_pos=nn.Dropout(0.6),
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
@@ -338,16 +342,25 @@ class Transformer(nn.Module):
 		tok_emb = self.stack.tok_embs(seq) # (batch, block_size, embed_dim) (B,T,C)
 		snip = tok_emb[:,:,:self.dim_snip].flatten(1)
 		snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0)
+		pos_emb = self.stack.dropout_pos(snip_pad.unfold(1, self.dim, self.dim_snip))
 
-		pos_emb = snip_pad.unfold(1, self.dim, self.dim_snip)
+		# arange = torch.arange(T, device=seq.device)
+		# pos_emb = self.stack.pos_embs(arange)
 
 		x = tok_emb + pos_emb
 
 		x = self.stack.dropout(x)
 		y = None
 
-		for block in self.blocks:
+		for i, block in enumerate(self.blocks):
+			# if (
+			# 	i == config.nlayers-1
+			# 	and torch.rand(1).item() < 0.1
+			# 	and self.training
+			# ):
+			# 	continue
 			x, y = block(x, y)
+
 
 		if targets is None:
 			x = x[:,-1]
@@ -380,8 +393,6 @@ class Transformer(nn.Module):
 			if top_k is not None:
 				v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
 				logits[logits < v[:, [-1]]] = -float('Inf')
-
 			next_idx = torch.multinomial(probs, num_samples=1)
 			idx = torch.cat((idx, next_idx), dim=1)
 		return idx
-
