@@ -1,0 +1,4 @@
+python main.py -a train --tensorboard -v 'pos_default_8w_droplin_8ng_decay_deepnorm' -lr 2e-3 -ml 5e-4 --decay-lr --deepnorm
+n_groups=8
+pos_win=8
+pos_drop=0.2

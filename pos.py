@@ -124,17 +124,17 @@ class CausalSelfAttention2(nn.Module):
 		self.dropout = config.dropout
 		self.resid_dropout = nn.Dropout(self.dropout)
 		self.block_drop = nn.Dropout(self.dropout)
-		# self.n_groups = int(config.block_size ** 0.5)
-		self.n_groups = 8
+		self.n_groups = int(config.block_size ** 0.5)
+		# self.n_groups = 2
 		self.per_group = (config.block_size // self.n_groups)
 		self.odd_even = config.nlayers % 2
 		self.flash = config.flash_attention
 
-	def do_att(self, q, k, v, g=False):
+	def do_att(self, q, k, v):
 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 				attn_mask=None,
-				# dropout_p=0,
-				dropout_p=config.dropout if (self.training and not g) else 0,
+				dropout_p=0,
+				# dropout_p=config.dropout if self.training else 0,
 				is_causal=True,
 			)
 
@@ -149,6 +149,8 @@ class CausalSelfAttention2(nn.Module):
 		y: Union[Tensor, None] = None,
 	):
 		B, T, C = x.size()
+		# v = self.c_attn_v(x)
+		# q, k = self.c_attn_qk(v).split(self.dim, dim=2)
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 		its_time = self.odd_even ^ ((self.idx + 1) % 2)
 		n_groups = self.n_groups
@@ -193,7 +195,6 @@ class CausalSelfAttention2(nn.Module):
 				q,
 				k,
 				x[:,:,:-1,-1:].view(B, self.n_heads, -1, self.head_size),
-                g=True,
 			).unsqueeze(3)
 			y = (q.unsqueeze(3), k.unsqueeze(3), v)
 			x = x[:,:,:,:-1] # crop footprints(blocks)
@@ -217,7 +218,6 @@ class NonLinear(nn.Module):
 		self.w2 = nn.Linear(4 * self.dim, self.dim, bias=config.bias) # bias=False in llama
 		self.w3 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias) # bias=False in llama
 		self.dropout = nn.Dropout(config.dropout)
-
 	def forward(self, x: Tensor):
 		return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
@@ -238,10 +238,11 @@ class Block(nn.Module):
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
+		self.ln3 = RMSNorm(self.head_size)
 		self.causal_self_attention = CausalSelfAttention2(self.idx)
 
 
-	def forward(self,
+	def forward(self, 
 		x: Tensor, y:
 		Union[Tensor, None] = None
 	):
@@ -249,11 +250,15 @@ class Block(nn.Module):
 
 		if y is not None:
 			y = self.block_drop(y[0]), self.block_drop(y[1]), self.block_drop(y[2])
-			# y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
+			y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
 		head_out, y = self.causal_self_attention(self.ln1(x), y)
 		# head_out = self.causal_self_attention(self.ln1(x))
 		res_con = x + head_out
-		hidden_state = res_con + self.ffn(self.ln2(res_con)) # NOTE:
+		hidden_state = res_con + self.ffn(self.ln2(res_con)) # NOTE: 
+
+		if config.health > 0 and config.mode == 'train':
+			config.layers_health[self.idx]['pre_layer'] = x.norm(2).item()
+			config.layers_health[self.idx]['post_attention'] = head_out.norm(2).item()
 
 		return hidden_state, y
 
@@ -262,17 +267,15 @@ class Transformer(nn.Module):
 	def __init__(self) -> NoReturn:
 		super().__init__()
 		self.dim = config.dim
-		self.pos_win = 8
+		self.pos_win = int(config.block_size ** 0.5)
 		self.dim_snip = self.dim // self.pos_win
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
 			# pos_embs=nn.Embedding(config.block_size, self.dim),
 			dropout=nn.Dropout(config.dropout),
-			dropout_pos=nn.Dropout(0.2),
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
-		self.pos_lin = nn.Parameter(torch.ones(1, 1, self.dim))
 		self.alpha = 1.0 if not config.deepnorm else math.pow(2.0 * config.nlayers, 0.25)
 		self.blocks = nn.ModuleList([Block(idx, self.alpha) for idx in range(config.nlayers)])
 		self.stack.tok_embs.weight = self.stack.lm_head.weight
@@ -317,7 +320,7 @@ class Transformer(nn.Module):
 			else:
 				nn.init.xavier_uniform_(module.weight, gain=1 / math.sqrt(2))
 			if module.bias is not None:
-				 nn.init.constant_(module.bias, 0.001)
+				 nn.init.constant_(module.bias, 0.0)
 		elif isinstance(module, nn.Embedding):
 			if config.init_weight == 'normal_':
 				nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -337,9 +340,7 @@ class Transformer(nn.Module):
 		tok_emb = self.stack.tok_embs(seq) # (batch, block_size, embed_dim) (B,T,C)
 		snip = tok_emb[:,:,:self.dim_snip].flatten(1)
 		snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0)
-		pos_emb = self.stack.dropout_pos(
-			snip_pad.unfold(1, self.dim, self.dim_snip) * self.pos_lin,
-		)
+		pos_emb = snip_pad.unfold(1, self.dim, self.dim_snip)
 
 		# arange = torch.arange(T, device=seq.device)
 		# pos_emb = self.stack.pos_embs(arange)
@@ -349,7 +350,7 @@ class Transformer(nn.Module):
 		x = self.stack.dropout(x)
 		y = None
 
-		for i, block in enumerate(self.blocks):
+		for block in self.blocks:
 			x, y = block(x, y)
 
 		if targets is None:
@@ -386,3 +387,4 @@ class Transformer(nn.Module):
 			next_idx = torch.multinomial(probs, num_samples=1)
 			idx = torch.cat((idx, next_idx), dim=1)
 		return idx
+

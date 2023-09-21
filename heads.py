@@ -104,36 +104,26 @@ class CausalSelfAttention2(nn.Module):
 		self.n_layers = num_layers
 		self.odd_even = self.n_layers % 2
 		self.dropout = 0.1
-		# self.register_buffer('bias', torch.tril(torch.ones(self.per_group + 1, self.per_group + 1))
-		# 							.view(1, 1, 1, self.per_group + 1, self.per_group + 1))
-		# self.register_buffer('bias2', torch.tril(torch.ones(self.n_groups, self.n_groups))
-		# 							.view(1, 1, self.n_groups, self.n_groups))
-		# self.register_buffer('bias3', torch.tril(torch.ones(self.per_group, self.per_group))
-		# 							.view(1, 1, self.per_group, self.per_group))
-
-
 	def do_att(self, q, k, v):
-
-		if True:
-			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 				attn_mask=None,
 				dropout_p=0,
+				# dropout_p=config.dropout if self.training else 0,
 				is_causal=True,
 			)
-		else:
-			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-			att = att.masked_fill(bias == 0, float('-inf'))
-			att = F.softmax(att, dim=-1)
-			# att = self.attn_dropout(att) # Find a replacement for it.
-			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
-		return y
 
-	def forward(self, x):
+	def do_block_merge(self, xblock, x):
+		other_blocks = torch.cat((xblock, x[:,:,1:,:]), dim=3)
+		first_block = torch.cat((x[:,:,:1], xblock[:,:,:1,-1:]), dim=3)
+		x = torch.cat((first_block, other_blocks), dim=2)
+		return x
+
+	def forward(self, x, y):
 		B, T, C = x.size()
-
-		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
-		odd_head = (self.idx + 1) % 2
-		its_time = (self.odd_even ^ odd_head)
+		v = self.c_attn_v(x)
+		q, k = self.c_attn_qk(v).split(self.dim, dim=2)
+		# q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+		its_time = self.odd_even ^ ((self.idx + 1) % 2)
 		n_groups = self.n_groups
 
 		if self.idx == 0 and T % self.per_group != 0 and T > self.per_group:
@@ -150,7 +140,6 @@ class CausalSelfAttention2(nn.Module):
 		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
 		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
 		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-
 		if n_groups > 1:
 			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
 			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
@@ -162,37 +151,34 @@ class CausalSelfAttention2(nn.Module):
 				q = torch.cat((q, qblock), dim=3)
 				k = torch.cat((k, kblock), dim=3)
 				v = torch.cat((v, vblock), dim=3)
-				print(vblock.shape)
-				T += n_groups
-				n_groups = min(T // self.per_group, self.n_groups)
-			# bias = self.bias[:,:,:,:q.size(3),:q.size(3)]
-		# else:
-			# bias = self.bias3[:,:,:self.per_group,:self.per_group]
+			elif y is not None:
+				qblock, kblock, vblock = y
+				q = self.do_block_merge(qblock, q)
+				k = self.do_block_merge(qblock, k)
+				v = self.do_block_merge(vblock, v)
+			T += 1
 
-		# x = self.do_att(q, k, v)
-		x = v + self.do_att(q, k, v)
-		if x.dim() > 4 and its_time:
-			# y = x[:,:,:,-1:].view(B, self.n_heads, -1, 1, self.head_size) + self.do_att(
-			y = self.do_att(
-				q[:,:,:-1,-1],
-				k[:,:,:-1,-1],
+		x = self.do_att(q, k, v)
+		if x.dim() > 4 and its_time: # Try run block attention in every layer.
+			# remove last block from q, k, v
+			q, k = q[:,:,:-1,-1], k[:,:,:-1,-1]
+			v = self.do_att(
+				q,
+				k,
 				x[:,:,:-1,-1:].view(B, self.n_heads, -1, self.head_size),
-				# self.bias2[:,:,:q.size(2),:q.size(2)],
 			).unsqueeze(3)
-			print(y.shape)
-			r = torch.cat((y, x[:,:,1:,:-1]), dim=3)
-			x = torch.cat((x[:,:,:1], r), dim=2)
+			y = (q.unsqueeze(3), k.unsqueeze(3), v)
+			x = x[:,:,:,:-1] # crop footprints(blocks)
+			T -= 1
 		else:
-			if self.idx != 0 and x.dim() > 4:
-				# x = x[:,:,:,1:] # there might be a leakage here.
-				# block = torch.cat((x[:,:,:1,:-2], x[:,:,:1,-1:]), dim=3)
-				# x = torch.cat((block, x[:,:,1:,1:]), dim=2) # solving a leakage
-				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2) # solving a leakage
-				T -= max(0, x.size(2))
+			if not its_time and x.dim() > 4:
+				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
+				T -= 1
+			y = None
 		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
 		x = x.transpose(1, 2).contiguous().view(B, T, C)
 		x = self.resid_dropout(self.c_proj(x))
-		return x
+		return x, y
 
 
 class Block(nn.Module):
