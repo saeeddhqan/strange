@@ -51,3 +51,16 @@
 			# 	# betas=(config.beta1, config.beta2),
 			# 	fused=use_fused,
 			# )
+# dimension-wise qkv:
+		# self.q = nn.init.xavier_uniform_(nn.Parameter(torch.randn(1, 1, self.dim)), gain=1/math.sqrt(2))
+		# self.k = nn.init.xavier_uniform_(nn.Parameter(torch.randn(1, 1, self.dim)), gain=1/math.sqrt(2))
+		# self.v = nn.init.xavier_uniform_(nn.Parameter(torch.randn(1, 1, self.dim)), gain=1/math.sqrt(2))
+		# q, k, v  = x * self.q, x * self.k, x * self.v
+# activation function
+			# class MyAct(nn.Module):
+			# 	def __init__(self):
+			# 		super().__init__()
+			# 		self.alt = nn.Parameter(torch.tensor(data=0.0))
+			# 	def forward(self, x):
+			# 		# return torch.where(x>=0.0, (x * (1 - (1 / (1 + x)))), self.alt)
+			# 		return torch.where(x>=0.0, (x * ((1 / (1 + math.e ** -x)))), self.alt)
