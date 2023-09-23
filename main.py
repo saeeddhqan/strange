@@ -340,7 +340,8 @@ class ManageModel:
 
 
 	def post_test(self) -> NoReturn:
-		pass
+		self.model.train()
+		config.mode = 'train'
 
 
 	@torch.no_grad()
@@ -351,15 +352,13 @@ class ManageModel:
 			of the model on train and test data. Learnt from nanoGPT
 			Parameters
 			----------
-
+			length: int
+				block size
 			Returns
 			-------
 			loss: dict
 				testing process loss
 		'''
-
-		self.model.eval()
-
 		out = {}
 		for split in ('train', 'test'):
 			# A tensor to capture the losses
@@ -370,9 +369,6 @@ class ManageModel:
 					_, loss = self.model(X, y)
 				losses[k] = loss.item()
 			out[split] = losses.mean()
-
-		self.model.train()
-
 		return out
 
 
@@ -385,8 +381,7 @@ class ManageModel:
 			epoch: int
 				current epoch
 		'''
-		state = config.mode
-		config.mode = 'inference'
+		self.pre_test()
 		seq, elapsed, elapsed_per_token = self.generator()
 		print(seq)
 		print('-' * 10)
@@ -407,7 +402,8 @@ class ManageModel:
 				'test/loss': test_loss,
 				'iter': epoch,
 			})
-		config.mode = state
+
+		self.post_test()		
 
 
 	def train_chunk(self, epoch: int) -> float:
@@ -456,9 +452,7 @@ class ManageModel:
 		self.elapsed_time += stop - start
 
 		if config.health > 0:
-
 			self.net_health(epoch, lr)
-
 
 		return epoch_loss
 
@@ -537,19 +531,16 @@ class ManageModel:
 			took_per_token: float
 				elapsed time to generate each token
 		'''
-		self.pre_test()
-
+		config.mode = 'inference'
 		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
 		start = time.time()
 		with config.autocast:
-			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
+			generated = self.model.autocomplete(X, seq_len*20, top_k=config.topk)
 		end = time.time()
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
 		took_per_token = took / len(decoded)
-
-		self.post_test()
-
+		config.mode = 'train'
 		return decoded, took, took_per_token
 
 
