@@ -116,15 +116,11 @@ class CausalSelfAttention2(nn.Module):
 		self.dim = config.dim
 		self.n_heads = config.nheads
 		self.head_size = self.dim // self.n_heads
-		# self.c_attn_v = nn.Linear(self.dim, self.dim, config.bias)
-		# self.c_attn_qk = nn.Linear(self.dim, self.dim * 2, True)
-		# self.c_attn_q = nn.Linear(self.dim, self.dim, True)
+
 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.dropout = config.dropout
 		self.resid_dropout = nn.Dropout(self.dropout)
-		self.block_drop = nn.Dropout(self.dropout)
-		# self.n_groups = int(config.block_size ** 0.5)
 		self.n_groups = 8
 		self.per_group = (config.block_size // self.n_groups)
 		self.odd_even = config.nlayers % 2
@@ -186,7 +182,7 @@ class CausalSelfAttention2(nn.Module):
 			T += 1
 
 		x = self.do_att(q, k, v)
-		if x.dim() > 4 and its_time: # Try run block attention in every layer.
+		if x.dim() > 4 and its_time: # Try run block attentions in every layer.
 			# remove last block from q, k, v
 			q, k = q[:,:,:-1,-1], k[:,:,:-1,-1]
 			v = self.do_att(
@@ -249,7 +245,6 @@ class Block(nn.Module):
 
 		if y is not None:
 			y = self.block_drop(y[0]), self.block_drop(y[1]), self.block_drop(y[2])
-			# y = self.ln3(y[0]), self.ln3(y[1]), self.ln3(y[2])
 		head_out, y = self.causal_self_attention(self.ln1(x), y)
 		# head_out = self.causal_self_attention(self.ln1(x))
 		res_con = x + head_out
@@ -386,3 +381,4 @@ class Transformer(nn.Module):
 			next_idx = torch.multinomial(probs, num_samples=1)
 			idx = torch.cat((idx, next_idx), dim=1)
 		return idx
+
