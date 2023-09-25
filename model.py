@@ -84,7 +84,6 @@ class CausalSelfAttention(nn.Module):
 
 	def forward(self, x):
 		B, T, C = x.size()
-
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 		k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 		q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -114,25 +113,23 @@ class CausalSelfAttention2(nn.Module):
 		assert config.dim % config.nheads == 0, 'embeds size is not divisible to the nheads'
 		self.idx = idx
 		self.dim = config.dim
-		self.n_heads = config.nheads
-		self.head_size = self.dim // self.n_heads
-
+		self.nheads = config.nheads
+		self.hsize = self.dim // self.nheads
+		# self.v_attn = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.dropout = config.dropout
 		self.resid_dropout = nn.Dropout(self.dropout)
 		self.n_groups = 8
-		self.per_group = (config.block_size // self.n_groups)
-		self.odd_even = config.nlayers % 2
-		self.flash = config.flash_attention
+		self.group_t = (config.block_size // self.n_groups) # tokens per group
+		self.its_time = config.nlayers % 2 ^ ((self.idx + 1) % 2)
 
-	def do_att(self, q, k, v, g=False):
+	def do_att(self, q, k, v, group=False):
 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-				attn_mask=None,
-				# dropout_p=0,
-				dropout_p=config.dropout if (self.training and not g) else 0,
-				is_causal=True,
-			)
+			attn_mask=None,
+			dropout_p=config.dropout if (self.training and not group) else 0,
+			is_causal=True,
+		)
 
 	def do_block_merge(self, xblock, x):
 		other_blocks = torch.cat((xblock, x[:,:,1:,:]), dim=3)
@@ -145,62 +142,40 @@ class CausalSelfAttention2(nn.Module):
 		y: Union[Tensor, None] = None,
 	):
 		B, T, C = x.size()
+		n_groups = min(T // self.group_t, self.n_groups)
+		# v = F.silu(self.v_attn(x))
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
-		its_time = self.odd_even ^ ((self.idx + 1) % 2)
-		n_groups = self.n_groups
 
-		if self.idx == 0 and T % self.per_group != 0 and T > self.per_group:
-			remain = self.per_group - (T % self.per_group) 
-			comp = remain * self.dim
-			T = T + remain
-			pad = torch.zeros(B, remain, q.size(2)).to(x.device)
-			q = torch.cat((q, pad), dim=1)
-			k = torch.cat((k, pad), dim=1)
-			v = torch.cat((v, pad), dim=1)
-			del pad, comp, remain
-
-		n_groups = min(T // self.per_group, self.n_groups)
-		q = q.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-		k = k.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-		v = v.view(B, T, self.n_heads, self.head_size).transpose(1, 2)
-		if n_groups > 1:
-			q = q.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-			k = k.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-			v = v.view(B, self.n_heads, n_groups, -1, self.head_size) # (B, nh, ng, gs, hs)
-			if its_time and q.size(2):
-				qblock = q.mean(dim=3).unsqueeze(3)
-				kblock = k.mean(dim=3).unsqueeze(3)
-				vblock = v.mean(dim=3).unsqueeze(3)
-				q = torch.cat((q, qblock), dim=3)
-				k = torch.cat((k, kblock), dim=3)
-				v = torch.cat((v, vblock), dim=3)
-			elif y is not None:
-				qblock, kblock, vblock = y
-				q = self.do_block_merge(qblock, q)
-				k = self.do_block_merge(qblock, k)
-				v = self.do_block_merge(vblock, v)
-			T += 1
+		# change shape (B, T, C) to (B, nh, ng, pg, C)
+		q = q.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
+		k = k.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
+		v = v.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
+		if self.its_time and n_groups > 0:
+			q = torch.cat((q, q.mean(dim=3).unsqueeze(3)), dim=3)
+			k = torch.cat((k, k.mean(dim=3).unsqueeze(3)), dim=3)
+			v = torch.cat((v, v.mean(dim=3).unsqueeze(3)), dim=3)
+		elif y is not None and n_groups > 0:
+			q = self.do_block_merge(y[0], q)
+			k = self.do_block_merge(y[1], k)
+			v = self.do_block_merge(y[2], v)
 
 		x = self.do_att(q, k, v)
-		if x.dim() > 4 and its_time: # Try run block attentions in every layer.
+		if self.its_time and n_groups > 0:
 			# remove last block from q, k, v
 			q, k = q[:,:,:-1,-1], k[:,:,:-1,-1]
 			v = self.do_att(
 				q,
 				k,
-				x[:,:,:-1,-1:].view(B, self.n_heads, -1, self.head_size),
-                g=True,
+				x[:,:,:-1,-1],
+				group=True,
 			).unsqueeze(3)
 			y = (q.unsqueeze(3), k.unsqueeze(3), v)
 			x = x[:,:,:,:-1] # crop footprints(blocks)
-			T -= 1
 		else:
-			if not its_time and x.dim() > 4:
+			if x.size(3) > self.group_t and n_groups > 0:
 				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
-				T -= 1
 			y = None
-		x = x.contiguous().view(B, self.n_heads, -1, x.size(-1))
-		x = x.transpose(1, 2).contiguous().view(B, T, C)
+		x = x.contiguous().view(B, self.nheads, x.size(2) * x.size(3), self.hsize).transpose(2, 1).contiguous().view(B, T, C)
 		x = self.resid_dropout(self.c_proj(x))
 		return x, y
 
