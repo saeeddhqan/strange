@@ -16,7 +16,8 @@ VARIATIONS:
 		decay_lr=True
 		pos_win=8
 		group=8
-		nonlinear=self.w4(F.silu(self.w3(self.w1(x) + self.w2(x))))
+		nonlinear=
+			self.w4(F.silu(self.w3(self.w1(x) + self.w2(x))))
 	weird_linearRegular:
 		lr=2e-3
 		nl=4

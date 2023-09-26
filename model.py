@@ -30,7 +30,6 @@ class Data:
 		self.test_data = data[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
-		# self.arange = torch.arange(config.block_size).view(1, -1).expand(config.batch_size, -1).to(config.device)
 
 	def __len__(self):
 		return self.vocab_size
@@ -85,9 +84,9 @@ class CausalSelfAttention(nn.Module):
 	def forward(self, x):
 		B, T, C = x.size()
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
-		k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-		q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-		v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+		k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+		q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+		v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 		if self.flash:
 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 				attn_mask=None,
@@ -99,7 +98,7 @@ class CausalSelfAttention(nn.Module):
 			att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
 			att = F.softmax(att, dim=-1)
 			# att = self.attn_dropout(att) # NOTE: my preference. it causes values of early tokens nan
-			y = att @ v # (B, nh, T, T) x (B, nho, T, hs) -> (B, nh, T, hs)
+			y = att @ v
 		
 		y = y.transpose(1, 2).contiguous().view(B, T, C)
 
@@ -115,8 +114,7 @@ class CausalSelfAttention2(nn.Module):
 		self.dim = config.dim
 		self.nheads = config.nheads
 		self.hsize = self.dim // self.nheads
-		self.v_attn = nn.Linear(self.dim, self.dim, bias=config.bias)
-		self.c_attn = nn.Linear(self.dim, 2 * self.dim, bias=config.bias)
+		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.dropout = config.dropout
 		self.resid_dropout = nn.Dropout(self.dropout)
@@ -146,18 +144,19 @@ class CausalSelfAttention2(nn.Module):
 	):
 		B, T, C = x.size()
 		n_groups = min(T // self.group_t, self.n_groups)
-		v = F.silu(self.v_attn(x))
-		q, k  = self.c_attn(v).split(self.dim, dim=2)
+		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
-		# change shape (B, T, C) to (B, nh, ng, pg, C)
+		# Change shape (B, T, C) to (B, nh, ng, gt, C)
 		q = q.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
 		k = k.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
 		v = v.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
 		if self.its_time and n_groups > 0:
+			# Create and add synthetic tokens
 			q = torch.cat((q, q.mean(dim=3).unsqueeze(3)), dim=3)
 			k = torch.cat((k, k.mean(dim=3).unsqueeze(3)), dim=3)
 			v = torch.cat((v, v.mean(dim=3).unsqueeze(3)), dim=3)
 		elif y is not None and n_groups > 0:
+			# Embed synthetic tokens at the beginning of blocks so that tokens can communicate with it
 			q = self.do_block_merge(y[0], q)
 			k = self.do_block_merge(y[1], k)
 			v = self.do_block_merge(y[2], v)
@@ -166,6 +165,7 @@ class CausalSelfAttention2(nn.Module):
 		if self.its_time and n_groups > 0:
 			# remove last block from q, k, v
 			q, k = q[:,:,:-1,-1], k[:,:,:-1,-1]
+			# One communication between synthetic tokens to share information between groups
 			v = self.do_att(
 				q,
 				k,
@@ -175,6 +175,7 @@ class CausalSelfAttention2(nn.Module):
 			y = (q.unsqueeze(3), k.unsqueeze(3), v)
 			x = x[:,:,:,:-1] # crop footprints(blocks)
 		else:
+			# If true, then remove synthetic tokens to clean the sequence.
 			if x.size(3) > self.group_t and n_groups > 0:
 				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
 			y = None
@@ -187,17 +188,19 @@ class NonLinear(nn.Module):
 	def __init__(self):
 		super().__init__()
 		self.dim = config.dim
-		self.w1 = nn.Linear(self.dim, 3 * self.dim, bias=config.bias) # bias=False in llama
-		self.w2 = nn.Linear(self.dim, 3 * self.dim, bias=config.bias) # bias=False in llama
-		self.w3 = nn.Linear(3 * self.dim, self.dim, bias=config.bias) # bias=False in llama
-		self.wb = nn.Linear(self.dim, 2 * self.dim, bias=config.bias) # bias=False in llama
+		self.w1 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias)
+		self.w2 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias)
+		self.w3 = nn.Linear(4 * self.dim, self.dim, bias=config.bias)
+		# self.wb = nn.Linear(self.dim, 2 * self.dim, bias=config.bias)
 		self.dropout = nn.Dropout(config.dropout)
 
 	def forward(self, x: Tensor):
+		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+
+	def forwardx(self, x: Tensor):
 		w, b = self.wb(x).split(self.dim, dim=2)
 		x = (w * x) + b
 		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
-		# return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 
 class Block(nn.Module):
@@ -245,11 +248,11 @@ class Transformer(nn.Module):
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
 			# pos_embs=nn.Embedding(config.block_size, self.dim),
 			dropout=nn.Dropout(config.dropout),
-			dropout_pos=nn.Dropout(0.2),
+			dropout_pos=nn.Dropout(0.4),
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
-		self.pos_lin = nn.Parameter(torch.ones(1, 1, self.dim))
+		# self.pos_lin = nn.Parameter(torch.ones(1, 1, self.dim))
 		self.alpha = 1.0 if not config.deepnorm else math.pow(2.0 * config.nlayers, 0.25)
 		self.blocks = nn.ModuleList([Block(idx, self.alpha) for idx in range(config.nlayers)])
 		self.stack.tok_embs.weight = self.stack.lm_head.weight
@@ -311,13 +314,14 @@ class Transformer(nn.Module):
 	) -> tuple[Tensor, Tensor]:
 
 		B, T = seq.shape
-		tok_emb = self.stack.tok_embs(seq) # (batch, block_size, embed_dim) (B,T,C)
+		tok_emb = self.stack.tok_embs(seq) # (B,T,C)
+
 		# Dynamic pos embedding
-		snip = tok_emb[:,:,:self.dim_snip].flatten(1)
-		snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0)
+		snip = tok_emb[:,:,:self.dim_snip].flatten(1) # (B, n)
+		snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
 		pos_emb = self.stack.dropout_pos(
-			snip_pad.unfold(1, self.dim, self.dim_snip) * self.pos_lin,
-		)
+			snip_pad.unfold(1, self.dim, self.dim_snip),
+		) # (B, T, C)
 
 		# arange = torch.arange(T, device=seq.device)
 		# pos_emb = self.stack.pos_embs(arange)
