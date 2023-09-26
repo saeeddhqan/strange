@@ -115,8 +115,8 @@ class CausalSelfAttention2(nn.Module):
 		self.dim = config.dim
 		self.nheads = config.nheads
 		self.hsize = self.dim // self.nheads
-		# self.v_attn = nn.Linear(self.dim, self.dim, bias=config.bias)
-		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
+		self.v_attn = nn.Linear(self.dim, self.dim, bias=config.bias)
+		self.c_attn = nn.Linear(self.dim, 2 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.dropout = config.dropout
 		self.resid_dropout = nn.Dropout(self.dropout)
@@ -124,18 +124,21 @@ class CausalSelfAttention2(nn.Module):
 		self.group_t = (config.block_size // self.n_groups) # tokens per group
 		self.its_time = config.nlayers % 2 ^ ((self.idx + 1) % 2)
 
-	def do_att(self, q, k, v, group=False):
+
+	def do_att(self, q: Tensor, k: Tensor, v: Tensor, group: bool = False):
 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 			attn_mask=None,
 			dropout_p=config.dropout if (self.training and not group) else 0,
 			is_causal=True,
 		)
 
-	def do_block_merge(self, xblock, x):
+
+	def do_block_merge(self, xblock: Tensor, x: Tensor):
 		other_blocks = torch.cat((xblock, x[:,:,1:,:]), dim=3)
 		first_block = torch.cat((x[:,:,:1], xblock[:,:,:1,-1:]), dim=3)
 		x = torch.cat((first_block, other_blocks), dim=2)
 		return x
+
 
 	def forward(self,
 		x: Tensor,
@@ -143,8 +146,8 @@ class CausalSelfAttention2(nn.Module):
 	):
 		B, T, C = x.size()
 		n_groups = min(T // self.group_t, self.n_groups)
-		# v = F.silu(self.v_attn(x))
-		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+		v = F.silu(self.v_attn(x))
+		q, k  = self.c_attn(v).split(self.dim, dim=2)
 
 		# change shape (B, T, C) to (B, nh, ng, pg, C)
 		q = q.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
@@ -184,13 +187,16 @@ class NonLinear(nn.Module):
 	def __init__(self):
 		super().__init__()
 		self.dim = config.dim
-		self.w1 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias) # bias=False in llama
-		self.w2 = nn.Linear(4 * self.dim, self.dim, bias=config.bias) # bias=False in llama
-		self.w3 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias) # bias=False in llama
+		self.w1 = nn.Linear(self.dim, 3 * self.dim, bias=config.bias) # bias=False in llama
+		self.w2 = nn.Linear(self.dim, 3 * self.dim, bias=config.bias) # bias=False in llama
+		self.w3 = nn.Linear(3 * self.dim, self.dim, bias=config.bias) # bias=False in llama
+		self.wb = nn.Linear(self.dim, 2 * self.dim, bias=config.bias) # bias=False in llama
 		self.dropout = nn.Dropout(config.dropout)
 
 	def forward(self, x: Tensor):
-		return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+		w, b = self.wb(x).split(self.dim, dim=2)
+		x = (w * x) + b
+		return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 
 class Block(nn.Module):
@@ -305,6 +311,7 @@ class Transformer(nn.Module):
 
 		B, T = seq.shape
 		tok_emb = self.stack.tok_embs(seq) # (batch, block_size, embed_dim) (B,T,C)
+		# Dynamic pos embedding
 		snip = tok_emb[:,:,:self.dim_snip].flatten(1)
 		snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0)
 		pos_emb = self.stack.dropout_pos(

@@ -21,6 +21,7 @@ nlayers = 4
 dim = 128
 bias = False
 
+
 class RMSNorm(nn.Module):
 	def __init__(self, dim: int, eps: float = 1e-5):
 		super().__init__()
@@ -123,13 +124,13 @@ class CausalSelfAttention2(nn.Module):
 	def forward(self, x, y):
 		'''
 			# Add rotary to synthetic tokens
-			# Use a decay on sequence
+			# Use a decay on groups
 			# it does not support arbitrary window size. Only fixed window size
 		'''
 		B, T, C = x.size()
 		n_groups = min(T // self.group_t, self.n_groups)
-		# v = F.silu(self.v_attn(x))
-		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+		v = F.silu(self.v_attn(x))
+		q, k  = self.c_attn(v).split(self.dim, dim=2)
 
 		# change shape (B, T, C) to (B, nh, ng, pg, C)
 		q = q.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
@@ -159,7 +160,6 @@ class CausalSelfAttention2(nn.Module):
 		else:
 			if x.size(3) > self.group_t and n_groups > 0:
 				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
-
 			y = None
 		x = x.contiguous().view(B, self.nheads, x.size(2) * x.size(3), self.hsize).transpose(2, 1).contiguous().view(B, T, C)
 		x = self.resid_dropout(self.c_proj(x))

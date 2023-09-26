@@ -46,9 +46,9 @@ set_seed(1244)
 block_size = 64
 dim = 128
 params = {
-	'block_size': block_size, # It needs to be 256 for bench.
-	'lr': 5e-4, # Learning rate
-	'min_lr': 6e-5, # Min learning rate
+	'block_size': block_size,
+	'lr': 1e-3, # Learning rate
+	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
 	'beta2': 0.99,
 	'decay_lr': False,
@@ -83,8 +83,7 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
-	'layers_health': [],
+	'health': False, # Monitor gradients in tensorboard
 }
 
 # From nanoGPT
@@ -173,10 +172,10 @@ class Config:
 				'wandb', 'tensorboard', 'details', 'data_file',
 				'variation', 'device', 'mode', 'autocast',
 				'healthcare', 'flash_attention', 'compile',
-				'layers_health', 'layer_wise_lr', 'init_weight',
+				'init_weight', 'health'
 			)
 		else:
-			filters = ('data_load', 'load', 'iterations', 'autocast', 'layers_health', 'layer_wise_lr')
+			filters = ('data_load', 'load', 'iterations', 'autocast', 'health')
 		params = {}
 		for k in self.__data_dict__:
 			if k not in filters:
@@ -193,7 +192,7 @@ class Config:
 		'''
 
 		filters = (
-			'data_load', 'action', 'load', 'workdir', 'mode', 'layers_health', 'layer_wise_lr')
+			'data_load', 'action', 'load', 'workdir', 'mode', 'health')
 		for k in params:
 			if k not in filters:
 				self.__data_dict__[k] = params[k]
@@ -379,7 +378,7 @@ class ManageModel:
 	@torch.no_grad()
 	def test(self, epoch: int) -> NoReturn:
 		'''
-			Generate a sequence, calculate loss, and logging
+			Generate a sequence, calculate loss, and log
 			Parameters
 			----------
 			epoch: int
@@ -410,13 +409,15 @@ class ManageModel:
 		config.mode = state
 
 
-	def train_chunk(self, epoch: int) -> float:
+	def train_chunk(self, epoch: int, test_cond: bool) -> float:
 		'''
 			A method for getting a chunk of data, run the model on it, and do training steps.
 			Parameters
 			----------
 			epoch: int
 				epoch
+			test_cond: bool
+				test condition
 			Returns
 			-------
 			loss: float
@@ -437,9 +438,6 @@ class ManageModel:
 
 		lr = config.lr if not config.decay_lr else lr
 
-		if config.health > 0:
-			config.layers_health = [{} for _ in range(config.nlayers)]
-
 		X, y = config.data_load.get_batch(epoch)
 		start = time.time()
 		with config.autocast:
@@ -455,8 +453,7 @@ class ManageModel:
 		stop = time.time()
 		self.elapsed_time += stop - start
 
-		if config.health > 0:
-
+		if config.health and test_cond:
 			self.net_health(epoch, lr)
 
 
@@ -476,7 +473,7 @@ class ManageModel:
 				specifies whether the training should continue or not.
 		'''
 		test_cond = epoch % config.eval_step == config.eval_step - 1 # NOTE: no
-		self.train_chunk(epoch)
+		self.train_chunk(epoch, test_cond)
 
 		# If it's not the right time to test the model.
 		if not test_cond:
@@ -568,13 +565,13 @@ if __name__ == '__main__':
 	parser.add_argument('--min-lr', '-ml', type=float, default=config.min_lr, help=f"minimum learning rate, default {config.min_lr}")
 	parser.add_argument('--dropout', '-do', type=float, default=config.dropout, help=f"dropout prob, default {config.dropout}")
 	parser.add_argument('--nlayers', '-nl', type=int, default=config.nlayers, help=f"number of blocks, default {config.nlayers}")
-	parser.add_argument('--num-heads', '-nh', type=int, default=config.nheads, help=f"number of heads, default {config.nheads}")
+	parser.add_argument('--nheads', '-nh', type=int, default=config.nheads, help=f"number of heads, default {config.nheads}")
 	parser.add_argument('--dim', '-d', type=int, default=config.dim, help=f"embedding size, default {config.dim}")
 	parser.add_argument('--block-size', '-bs', type=int, default=config.block_size, help=f"length input sequence, default {config.block_size}")
 	parser.add_argument('--batch-size', '-b', type=int, default=config.batch_size, help=f"batch size, default {config.batch_size}")
-	parser.add_argument('--health', type=int, default=config.health, help=f"1 for logging vector's norm, 2 for 1 + gradient and weight norm, default {config.health}")
 	parser.add_argument('--topk', type=int, default=config.topk, help=f"topk sampling, default {config.topk}")
 	parser.add_argument('--stop-loss', type=float, default=config.stop_loss, help=f"training stops when test loss is <= a treshold, default {config.stop_loss}")
+	parser.add_argument('--health', action='store_true', default=config.health, help=f"gradient health monitoring, default {config.health}")
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help=f"use wandb for visualization, default {config.wandb}")
 	parser.add_argument('--tensorboard', action='store_true', default=config.tensorboard, help=f"use tensorboard for visualization, default {config.tensorboard}")
 	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"compile the model for faster training, default {config.compile}")
