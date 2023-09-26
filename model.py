@@ -196,7 +196,8 @@ class NonLinear(nn.Module):
 	def forward(self, x: Tensor):
 		w, b = self.wb(x).split(self.dim, dim=2)
 		x = (w * x) + b
-		return self.w3(F.silu(self.w1(x)) * self.w2(x))
+		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+		# return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 
 class Block(nn.Module):
