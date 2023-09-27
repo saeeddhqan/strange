@@ -9,6 +9,6 @@ python main.py -a train -d <dim> -nl <num-layers> -nh <num-heads> -bs <block-siz
 
 ```bash
 
-python main.py -a train -nl 4 -nh 4 -d 320 -lr 2e-3 -ml 1e-4 --decay-lr
+python main.py -a train -lr 2e-3 -ml 1e-4 --decay-lr --tensorboard -v 'orig_expand' --data-file data/addition.txt
 
 ```

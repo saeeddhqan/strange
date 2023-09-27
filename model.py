@@ -389,7 +389,7 @@ class Transformer(nn.Module):
 		y = None
 
 		for i, block in enumerate(self.blocks):
-			x, y = block(x, y, freqs_cis=self.freqs_cis[:T].to(seq.device))
+			x, y = block(x, y, freqs_cis=None if self.pos_method != 'rope' else self.freqs_cis[:T].to(seq.device))
 
 		if targets is None:
 			x = x[:,-1]

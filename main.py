@@ -17,7 +17,7 @@ import model
 import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
-
+import re
 
 
 def set_seed(seed):
@@ -61,7 +61,7 @@ params = {
 	'dropout': 0.1,
 	'dim': dim,
 	'weight_decay': 0.001,
-	'stop_loss': 1.4, # When can we stop training? once the stop_loss is <= n and once epochs are done.
+	'stop_loss': 0.0, # When can we stop training? once the stop_loss is <= n and once epochs are done.
 	'vocab_size': 0,
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': 'stable', # When we change something, change this to distinguish different variations.
@@ -84,7 +84,7 @@ params = {
 	'init_weight': 'xavier',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
-	'pos': 'rope', # rope, dynamic, learnable
+	'pos': 'dynamic', # rope, dynamic, learnable
 }
 
 # From nanoGPT
@@ -388,28 +388,32 @@ class ManageModel:
 				current epoch
 		'''
 		state = config.mode
+		default_block = config.block_size
 		config.mode = 'inference'
-		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
-		print(seq)
-		print('-' * 10)
-		print(f"[{epoch}] > Elapsed: {elapsed}")
-		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
-		self.loss = self.calculate_loss(config.block_size)
-		test_loss = round(self.loss['test'].item(), 4)
-		train_loss = round(self.loss['train'].item(), 4)
-		print(f"[{epoch}] > train: {train_loss}, test: {test_loss}")
-		print('-' * 30)
-		if config.tensorboard:
-			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
-			self.tensorboard_writer.flush()
-		if config.wandb:
-			wandb.log({
-				'train/loss': train_loss,
-				'test/loss': test_loss,
-				'iter': epoch,
-			})
+		for i in range(1, 3):
+			config.block_size = config.block_size * i
+			seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
+			print(seq)
+			print('-' * 10)
+			print(f"[{epoch}] > Elapsed: {elapsed}")
+			print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
+			self.loss = self.calculate_loss(config.block_size)
+			test_loss = round(self.loss['test'].item(), 4)
+			train_loss = round(self.loss['train'].item(), 4)
+			print(f"[{epoch}] > train: {train_loss}, test: {test_loss}")
+			print('-' * 60)
+			if config.tensorboard:
+				self.tensorboard_writer.add_scalar(f'train_loss_{config.block_size}', train_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'test_loss_{config.block_size}', test_loss, epoch, new_style=True)
+				self.tensorboard_writer.flush()
+			if config.wandb:
+				wandb.log({
+					'train/loss': train_loss,
+					'test/loss': test_loss,
+					'iter': epoch,
+				})
 		config.mode = state
+		config.block_size = default_block
 
 
 	def train_chunk(self, epoch: int, test_cond: bool) -> float:
@@ -520,7 +524,7 @@ class ManageModel:
 
 
 	@torch.no_grad()
-	def generator(self, seq_len: int = 100, epoch: int = 0) -> tuple[str, float, float]:
+	def generator(self, seq_len: int = 200, epoch: int = 0) -> tuple[str, float, float]:
 		'''
 			Generate a sequence with seq_len length and return it
 			along with time elapsed.
@@ -538,15 +542,38 @@ class ManageModel:
 				elapsed time to generate each token
 		'''
 		self.pre_test()
-
-		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
 		start = time.time()
+
+		X, _ = config.data_load.get_batch(0, 'test', batch_size=1, block_size=config.block_size)
 		with config.autocast:
 			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
 		end = time.time()
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
 		took_per_token = took / len(decoded)
+
+		dsplit = []
+		count = 0
+		corr = 0
+		all_lines = 0
+		for x in decoded.split('\n'):
+			search = re.search(r'(\d\d)\+(\d\d)=([\d]{2,3})', x)
+			if search is not None:
+				groups = search.groups()
+				if len(groups) == 3:
+					n1 = int(groups[0])
+					n2 = int(groups[1])
+					n3 = int(groups[2])
+					if n1 + n2 == n3:
+						corr += 1
+					count += 1
+			all_lines += 1
+
+		if config.tensorboard:
+			self.tensorboard_writer.add_scalar(f'accuracy_{config.block_size}', corr / count, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar(f'coherent_{config.block_size}', count / all_lines, epoch, new_style=True)
+		print('all=', count, ',correct=', corr, f',accuracy_{config.block_size}=', corr / count)
+		print('all=', count, ',correct=', corr, f',coherent_{config.block_size}=', count / all_lines)
 
 		self.post_test()
 
