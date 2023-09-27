@@ -84,6 +84,7 @@ params = {
 	'init_weight': 'xavier',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
+	'pos': 'rope', # rope, dynamic, learnable
 }
 
 # From nanoGPT
@@ -284,21 +285,23 @@ class ManageModel:
 				# betas=(config.beta1, config.beta2),
 				fused=use_fused,
 			)
+		
+		variation = f"{config.variation}_{config.nlayers}nl_{config.nheads}nh_{config.dim}d_{config.dropout}do_{config.block_size}bs_{int(config.deepnorm)}dn_{config.lr}lr_{int(config.decay_lr)}dlr_{config.pos}"
 
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
-				comment='_' + config.variation,
+				comment='_' + variation,
 				filename_suffix='',
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
 				project='Wizard Cloak',
-				name=config.variation,
+				name=variation,
 				config=config.get_model_params(),
 			)
 		self.path_format = os.path.join(
 			config.workdir,
-			f"model_{config.variation}",
+			f"model_{variation}",
 		)
 
 		if config.wandb:
@@ -386,7 +389,7 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		seq, elapsed, elapsed_per_token = self.generator()
+		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
 		print(seq)
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
@@ -517,7 +520,7 @@ class ManageModel:
 
 
 	@torch.no_grad()
-	def generator(self, seq_len: int = 100) -> tuple[str, float, float]:
+	def generator(self, seq_len: int = 100, epoch: int = 0) -> tuple[str, float, float]:
 		'''
 			Generate a sequence with seq_len length and return it
 			along with time elapsed.
