@@ -13,7 +13,7 @@ import wandb
 import argparse
 import time
 import random
-import model2 as model
+import model
 import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
@@ -82,10 +82,10 @@ params = {
 	'flash_attention': True,
 	'bias': False,
 	'deepnorm': False,
-	'init_weight': 'xavier',
+	'init_weight': '_normal',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
-	'pos': 'dynamic', # rope, dynamic, learnable
+	'pos': 'learnable', # rope, dynamic, learnable
 }
 
 
@@ -287,8 +287,7 @@ class ManageModel:
 				fused=use_fused,
 			)
 
-		variation = f"{config.variation}_{config.nlayers}nl_{config.nheads}nh_{config.dim}d_{config.dropout}do_{config.block_size}bs_{int(config.deepnorm)}dn_{config.lr}lr_{int(config.decay_lr)}dlr_{config.ngroups}_{config.pos}"
-
+		variation = f"{config.variation}_{config.nlayers}nl_{config.nheads}nh_{config.dim}d_{config.dropout}do_{config.block_size}bs_{int(config.deepnorm)}dn_{config.lr}lr_{int(config.decay_lr)}dlr_{config.ngroups}ng_{config.pos}"
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
 				comment='_' + variation,
