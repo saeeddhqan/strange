@@ -164,7 +164,7 @@ class CausalSelfAttention2(nn.Module):
 		self.resid_dropout = nn.Dropout(self.dropout)
 		self.block_drop = nn.Dropout(self.dropout)
 
-		self.n_groups = 64
+		self.n_groups = config.ngroups
 		self.group_t = (config.block_size // self.n_groups) # tokens per group
 		self.its_time = config.nlayers % 2 ^ ((self.idx + 1) % 2)
 
@@ -269,21 +269,17 @@ class Block(nn.Module):
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
-		self.causal_self_attention = CausalSelfAttention(self.idx)
-
+		self.causal_self_attention = CausalSelfAttention2(self.idx)
 
 	def forward(self,
-		x: Tensor, 
-		y: Union[Tensor, None] = None,
+		x: Tensor,
+		y: Tensor,
 		freqs_cis: Union[Tensor, None] = None,
 	):
 		B, T, C = x.shape
-
-		# head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis)
-		head_out = self.causal_self_attention(self.ln1(x), freqs_cis)
-		res_con = x + head_out
-		hidden_state = res_con + self.ffn(self.ln2(res_con))
-
+		head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis)
+		head_out = x + head_out
+		hidden_state = head_out + self.ffn(self.ln2(head_out))
 		return hidden_state, y
 
 
@@ -293,6 +289,7 @@ class Transformer(nn.Module):
 		self.dim = config.dim
 		self.pos_method = config.pos
 		self.freqs_cis = None
+		self.ngroups = config.ngroups
 
 		if self.pos_method == 'dynamic':
 			self.pos_win = 10
@@ -370,11 +367,11 @@ class Transformer(nn.Module):
 	) -> tuple[Tensor, Tensor]:
 
 		B, T = seq.shape
-		tok_emb = self.stack.tok_embs(seq) # (B,T,C)
+		x = self.stack.tok_embs(seq) # (B,T,C)
 
 		# Dynamic pos embedding
 		if self.pos_method == 'dynamic':
-			snip = tok_emb[:,:,:self.dim_snip].flatten(1) # (B, n)
+			snip = x[:,:,:self.dim_snip].flatten(1) # (B, n)
 			snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
 			pos_emb = self.stack.dropout_pos(
 				snip_pad.unfold(1, self.dim, self.dim_snip),
@@ -383,13 +380,14 @@ class Transformer(nn.Module):
 			arange = torch.arange(T, device=seq.device)
 			pos_emb = self.stack.pos_embs(arange)
 
-		x = tok_emb + pos_emb if self.pos_method != 'rope' else tok_emb
+		x = x + pos_emb if self.pos_method != 'rope' else x
 
+		freqs_cis = None if self.pos_method != 'rope' else self.freqs_cis[:T].to(seq.device)
 		x = self.stack.dropout(x)
-		y = None
 
+		y = None
 		for i, block in enumerate(self.blocks):
-			x, y = block(x, y, freqs_cis=self.freqs_cis[:T].to(seq.device))
+			x, y = block(x, y, freqs_cis=freqs_cis)
 
 		if targets is None:
 			x = x[:,-1]

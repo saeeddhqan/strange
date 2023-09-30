@@ -13,7 +13,7 @@ import wandb
 import argparse
 import time
 import random
-import model
+import model2 as model
 import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
@@ -58,6 +58,7 @@ params = {
 	'batch_size': 64,
 	'nlayers': 2,
 	'nheads': 4,
+	'ngroups': 8,
 	'dropout': 0.1,
 	'dim': dim,
 	'weight_decay': 0.001,
@@ -84,10 +85,10 @@ params = {
 	'init_weight': 'xavier',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
-	'pos': 'rope', # rope, dynamic, learnable
+	'pos': 'dynamic', # rope, dynamic, learnable
 }
 
-# From nanoGPT
+
 def after_conf_init():
 	'''
 		boring
@@ -285,8 +286,8 @@ class ManageModel:
 				# betas=(config.beta1, config.beta2),
 				fused=use_fused,
 			)
-		
-		variation = f"{config.variation}_{config.nlayers}nl_{config.nheads}nh_{config.dim}d_{config.dropout}do_{config.block_size}bs_{int(config.deepnorm)}dn_{config.lr}lr_{int(config.decay_lr)}dlr_{config.pos}"
+
+		variation = f"{config.variation}_{config.nlayers}nl_{config.nheads}nh_{config.dim}d_{config.dropout}do_{config.block_size}bs_{int(config.deepnorm)}dn_{config.lr}lr_{int(config.decay_lr)}dlr_{config.ngroups}_{config.pos}"
 
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
@@ -578,7 +579,7 @@ if __name__ == '__main__':
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help=f"use wandb for visualization, default {config.wandb}")
 	parser.add_argument('--tensorboard', action='store_true', default=config.tensorboard, help=f"use tensorboard for visualization, default {config.tensorboard}")
 	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"compile the model for faster training, default {config.compile}")
-	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"weigth decay, default {config.decay_lr}")
+	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"decay learning rate, default {config.decay_lr}")
 	parser.add_argument('--deepnorm', action='store_true', default=config.deepnorm, help=f"use deep layer normalizer, default {config.deepnorm}")
 	args = parser.parse_args()
 
