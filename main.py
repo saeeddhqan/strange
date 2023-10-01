@@ -388,32 +388,28 @@ class ManageModel:
 				current epoch
 		'''
 		state = config.mode
-		default_block = config.block_size
 		config.mode = 'inference'
-		for i in range(1, 3):
-			config.block_size = config.block_size * i
-			seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
-			print(seq)
-			print('-' * 10)
-			print(f"[{epoch}] > Elapsed: {elapsed}")
-			print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
-			self.loss = self.calculate_loss(config.block_size)
-			test_loss = round(self.loss['test'].item(), 4)
-			train_loss = round(self.loss['train'].item(), 4)
-			print(f"[{epoch}] > train: {train_loss}, test: {test_loss}")
-			print('-' * 60)
-			if config.tensorboard:
-				self.tensorboard_writer.add_scalar(f'train_loss_{config.block_size}', train_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'test_loss_{config.block_size}', test_loss, epoch, new_style=True)
-				self.tensorboard_writer.flush()
-			if config.wandb:
-				wandb.log({
-					'train/loss': train_loss,
-					'test/loss': test_loss,
-					'iter': epoch,
-				})
+		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
+		print(seq)
+		print('-' * 10)
+		print(f"[{epoch}] > Elapsed: {elapsed}")
+		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
+		self.loss = self.calculate_loss(config.block_size)
+		test_loss = round(self.loss['test'].item(), 4)
+		train_loss = round(self.loss['train'].item(), 4)
+		print(f"[{epoch}] > train: {train_loss}, test: {test_loss}")
+		print('-' * 30)
+		if config.tensorboard:
+			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
+			self.tensorboard_writer.flush()
+		if config.wandb:
+			wandb.log({
+				'train/loss': train_loss,
+				'test/loss': test_loss,
+				'iter': epoch,
+			})
 		config.mode = state
-		config.block_size = default_block
 
 
 	def train_chunk(self, epoch: int, test_cond: bool) -> float:
@@ -553,30 +549,6 @@ class ManageModel:
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
 		took_per_token = took / len(decoded)
-
-		dsplit = []
-		count = 0
-		corr = 0
-		all_lines = 0
-		for x in decoded.split('\n'):
-			search = re.search(r'(\d\d)\+(\d\d)=([\d]{2,3})', x)
-			if search is not None:
-				groups = search.groups()
-				if len(groups) == 3:
-					n1 = int(groups[0])
-					n2 = int(groups[1])
-					n3 = int(groups[2])
-					if n1 + n2 == n3:
-						corr += 1
-					count += 1
-			all_lines += 1
-
-		if config.tensorboard:
-			self.tensorboard_writer.add_scalar(f'accuracy_{config.block_size}', corr / count, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar(f'coherent_{config.block_size}', count / all_lines, epoch, new_style=True)
-		print('all=', count, ',correct=', corr, f',accuracy_{config.block_size}=', corr / count)
-		print('all=', count, ',correct=', corr, f',coherent_{config.block_size}=', count / all_lines)
-
 		self.post_test()
 
 		return decoded, took, took_per_token
