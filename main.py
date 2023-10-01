@@ -7,7 +7,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import torch
 from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
-import wandb, argparse, time, random, math, numpy, re
+import wandb, argparse, time, random, math, numpy
 import model
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
