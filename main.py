@@ -5,24 +5,17 @@ Contains main methods for training a model.
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import torch
-from torch import Tensor
-import torch.nn as nn
+from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
-import numpy as np
-import wandb
-import argparse
-import time
-import random
+import wandb, argparse, time, random, math, numpy, re
 import model
-import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
 
 
-
-def set_seed(seed):
+def set_seed(seed: int):
 	random.seed(seed)
-	np.random.seed(seed)
+	numpy.random.seed(seed)
 	torch.manual_seed(seed)
 	torch.cuda.manual_seed(seed)
 	torch.cuda.manual_seed_all(seed)
@@ -59,10 +52,11 @@ params = {
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
+	'pos_win': 10,
 	'dropout': 0.1,
 	'dim': dim,
 	'weight_decay': 0.001,
-	'stop_loss': 1.4, # When can we stop training? once the stop_loss is <= n and once epochs are done.
+	'stop_loss': 0.0, # When can we stop training? once the stop_loss is <= n and once epochs are done.
 	'vocab_size': 0,
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': 'stable', # When we change something, change this to distinguish different variations.
@@ -82,10 +76,10 @@ params = {
 	'flash_attention': True,
 	'bias': False,
 	'deepnorm': False,
-	'init_weight': '_normal',
+	'init_weight': 'xavier',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
-	'pos': 'learnable', # rope, dynamic, learnable
+	'pos': 'rope', # rope, dynamic, learnable
 }
 
 
@@ -287,7 +281,13 @@ class ManageModel:
 				fused=use_fused,
 			)
 
-		variation = f"{config.variation}_{config.nlayers}nl_{config.nheads}nh_{config.dim}d_{config.dropout}do_{config.block_size}bs_{int(config.deepnorm)}dn_{config.lr}lr_{int(config.decay_lr)}dlr_{config.ngroups}ng_{config.pos}"
+		variation = f"{config.variation}_{config.nlayers}nl_\
+			{config.nheads}nh_{config.dim}d_{config.dropout}\
+			do_{config.block_size}bs_{int(config.deepnorm)}\
+			dn_{config.lr}lr_{int(config.decay_lr)}\
+			dlr_{config.ngroups}ng_{config.pos_win}\
+			w_{config.pos}"
+
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
 				comment='_' + variation,
