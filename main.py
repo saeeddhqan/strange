@@ -5,24 +5,17 @@ Contains main methods for training a model.
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import torch
-from torch import Tensor
-import torch.nn as nn
+from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
-import numpy as np
-import wandb
-import argparse
-import time
-import random
+import wandb, argparse, time, random, math, numpy, re
 import model
-import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
-import re
 
 
-def set_seed(seed):
+def set_seed(seed: int):
 	random.seed(seed)
-	np.random.seed(seed)
+	numpy.random.seed(seed)
 	torch.manual_seed(seed)
 	torch.cuda.manual_seed(seed)
 	torch.cuda.manual_seed_all(seed)
@@ -58,6 +51,8 @@ params = {
 	'batch_size': 64,
 	'nlayers': 2,
 	'nheads': 4,
+	'ngroups': 8,
+	'pos_win': 10,
 	'dropout': 0.1,
 	'dim': dim,
 	'weight_decay': 0.001,
@@ -84,10 +79,10 @@ params = {
 	'init_weight': 'xavier',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
-	'pos': 'dynamic', # rope, dynamic, learnable
+	'pos': 'rope', # rope, dynamic, learnable
 }
 
-# From nanoGPT
+
 def after_conf_init():
 	'''
 		boring
@@ -285,8 +280,13 @@ class ManageModel:
 				# betas=(config.beta1, config.beta2),
 				fused=use_fused,
 			)
-		
-		variation = f"{config.variation}_{config.nlayers}nl_{config.nheads}nh_{config.dim}d_{config.dropout}do_{config.block_size}bs_{int(config.deepnorm)}dn_{config.lr}lr_{int(config.decay_lr)}dlr_{config.pos}"
+
+		variation = f"{config.variation}_{config.nlayers}nl_\
+			{config.nheads}nh_{config.dim}d_{config.dropout}\
+			do_{config.block_size}bs_{int(config.deepnorm)}\
+			dn_{config.lr}lr_{int(config.decay_lr)}\
+			dlr_{config.ngroups}ng_{config.pos_win}\
+			w_{config.pos}"
 
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
@@ -542,9 +542,11 @@ class ManageModel:
 				elapsed time to generate each token
 		'''
 		self.pre_test()
+
+		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
+
 		start = time.time()
 
-		X, _ = config.data_load.get_batch(0, 'test', batch_size=1, block_size=config.block_size)
 		with config.autocast:
 			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
 		end = time.time()
@@ -605,7 +607,7 @@ if __name__ == '__main__':
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help=f"use wandb for visualization, default {config.wandb}")
 	parser.add_argument('--tensorboard', action='store_true', default=config.tensorboard, help=f"use tensorboard for visualization, default {config.tensorboard}")
 	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"compile the model for faster training, default {config.compile}")
-	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"weigth decay, default {config.decay_lr}")
+	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"decay learning rate, default {config.decay_lr}")
 	parser.add_argument('--deepnorm', action='store_true', default=config.deepnorm, help=f"use deep layer normalizer, default {config.deepnorm}")
 	args = parser.parse_args()
 
