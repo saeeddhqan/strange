@@ -79,7 +79,8 @@ params = {
 	'init_weight': 'xavier',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
-	'pos': 'rope', # rope, dynamic, learnable
+	'pos': 'dynamic', # rope, dynamic, learnable
+	'attention': 1,
 }
 
 
@@ -281,12 +282,12 @@ class ManageModel:
 				fused=use_fused,
 			)
 
-		variation = f"{config.variation}_{config.nlayers}nl_\
-			{config.nheads}nh_{config.dim}d_{config.dropout}\
-			do_{config.block_size}bs_{int(config.deepnorm)}\
-			dn_{config.lr}lr_{int(config.decay_lr)}\
-			dlr_{config.ngroups}ng_{config.pos_win}\
-			w_{config.pos}"
+		posfix = config.pos if config.pos in ('learnable', 'rope') else f'{config.pos_win}w_{config.pos}'
+		variation = f"{config.variation}_{config.attention}v_{config.nlayers}nl_\
+		{config.nheads}nh_{config.dim}d_{config.dropout}\
+		do_{config.block_size}bs_{int(config.deepnorm)}\
+		dn_{config.lr}lr_{int(config.decay_lr)}\
+		dlr_{config.ngroups}ng_{posfix}".strip().replace('\t', '').replace(' ', '')
 
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
@@ -520,7 +521,7 @@ class ManageModel:
 
 
 	@torch.no_grad()
-	def generator(self, seq_len: int = 200, epoch: int = 0) -> tuple[str, float, float]:
+	def generator(self, seq_len: int = 100, epoch: int = 0) -> tuple[str, float, float]:
 		'''
 			Generate a sequence with seq_len length and return it
 			along with time elapsed.
