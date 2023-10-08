@@ -21,8 +21,8 @@ class Data:
 		self.encode = lambda s: [self.stoi[x] for x in s]
 		self.decode = lambda e: ''.join([self.itos[x] for x in e])
 		data = torch.tensor(self.encode(text), dtype=torch.long)
-		if config.device == 'cuda':
-			data = data.pin_memory().to(config.device, non_blocking=True)
+		# if config.device == 'cuda':
+		# 	data = data.pin_memory().to(config.device, non_blocking=True)
 
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
@@ -30,8 +30,10 @@ class Data:
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
 
+
 	def __len__(self):
 		return self.vocab_size
+
 
 	def get_batch(self, 
 		idx: int, split: str = 'train',
@@ -39,12 +41,14 @@ class Data:
 		batch_size: int = -1,
 	) -> tuple[Tensor, Tensor]:
 		block_size = self.block_size if block_size is None else block_size
-		data = self.train_data if split == 'train' else self.test_data
 		batch_size = self.batch_size if batch_size == -1 else batch_size
-		ix = torch.randint(len(data) - (block_size + 1), (batch_size,))
+
+		data = self.train_data if split == 'train' else self.test_data
+		# From (block_size + 1) to block_size just in case
+		ix = torch.randint(len(data) - block_size, (batch_size,))
 		x = torch.stack([data[i:i + block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
-		return x, y
+		return x.pin_memory().to(config.device, non_blocking=True), y.pin_memory().to(config.device, non_blocking=True)
 
 
 class RMSNorm(nn.Module):
@@ -113,7 +117,7 @@ class CausalSelfAttention(nn.Module):
 			self.register_buffer('bias', torch.tril(torch.ones(self.block_size, self.block_size))
 										.view(1, 1, self.block_size, self.block_size))
 
-	def forward(self, x: Tensor, freqs_cis: Optional[Union[Tensor, None]] = None):
+	def forward(self, x: Tensor, y: None, freqs_cis: Optional[Union[Tensor, None]] = None):
 		B, T, C = x.size()
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
@@ -145,7 +149,7 @@ class CausalSelfAttention(nn.Module):
 		y = y.transpose(1, 2).contiguous().view(B, T, C)
 
 		y = self.resid_dropout(self.c_proj(y))
-		return y
+		return y, None
 
 
 class CausalSelfAttention2(nn.Module):
@@ -264,7 +268,7 @@ class Block(nn.Module):
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
-		self.causal_self_attention = CausalSelfAttention(self.idx)
+		self.causal_self_attention = CausalSelfAttention2(self.idx) if config.attention == 2 else CausalSelfAttention(self.idx)
 
 	def forward(self,
 		x: Tensor,
@@ -272,8 +276,7 @@ class Block(nn.Module):
 		freqs_cis: Union[Tensor, None] = None,
 	) -> Tuple[Tensor, Union[Tensor, None]]:
 
-		# head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis)
-		head_out = self.causal_self_attention(self.ln1(x), freqs_cis=freqs_cis)
+		head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis=freqs_cis)
 		head_out = x + head_out
 		hidden_state = head_out + self.ffn(self.ln2(head_out))
 		return hidden_state, y
@@ -296,7 +299,7 @@ class Transformer(nn.Module):
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
 			pos_embs=nn.Embedding(config.block_size, self.dim) if self.pos_method == 'learnable' else None,
 			dropout=nn.Dropout(config.dropout),
-			dropout_pos=nn.Dropout(0.4) if self.pos_method == 'dynamic' else None,
+			dropout_pos=nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None,
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
