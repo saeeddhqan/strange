@@ -69,7 +69,7 @@ params = {
 	'init_weight': 'xavier',
 	'topk': -1,
 	'health': False, # Monitor gradients in tensorboard
-	'pos': 'dynamic', # rope, dynamic, learnable
+	'pos': 'rope', # rope, dynamic, learnable
 	'attention': 1,
 }
 
@@ -421,7 +421,7 @@ class ManageModel:
 		epoch = 0
 		X, Y = config.data_load.get_batch(epoch)
 		while True:
-			lr = get_lr(epoch + 1) if config.decay_lr else config.lr
+			lr = self.get_lr(epoch + 1) if config.decay_lr else config.lr
 
 			for param_group in self.optimizer.param_groups:
 				param_group['lr'] = lr
