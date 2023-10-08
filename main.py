@@ -213,7 +213,7 @@ class ManageModel:
 		decay_ratio = (epoch - warmup_iters) / (lr_decay_iters - warmup_iters)
 		assert 0 <= decay_ratio <= 1
 		coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-		return min_lr + coeff * (config.lr - config.min_lr)
+		return config.min_lr + coeff * (config.lr - config.min_lr)
 
 
 	def load_model(self, path: str) -> NoReturn:
