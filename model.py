@@ -372,7 +372,7 @@ class Transformer(nn.Module):
 			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
 			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
 			pos_emb = self.stack.dropout_pos(
-				snip_pad.unfold(1, self.dim, self.dim_snip),
+				pos_emb.unfold(1, self.dim, self.dim_snip),
 			) # (B, T, C)
 		elif self.pos_method == 'learnable':
 			arange = torch.arange(T, device=seq.device)

@@ -68,7 +68,7 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'pos': 'rope', # rope, dynamic, learnable
+	'pos': 'dynamic', # rope, dynamic, learnable
 	'attention': 1,
 }
 
