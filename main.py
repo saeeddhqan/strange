@@ -42,7 +42,7 @@ params = {
 	'pos_win': 8,
 	'accumulation_steps': 1,
 	'dropout': 0.1,
-	'dropout_pos': 0.1,
+	'dropout_pos': 0.0,
 	'dim': dim,
 	'weight_decay': 0.001,
 	'grad_clip': 1.0,
@@ -68,7 +68,6 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'health': False, # Monitor gradients in tensorboard
 	'pos': 'rope', # rope, dynamic, learnable
 	'attention': 1,
 }
@@ -158,11 +157,11 @@ class Config:
 				'data_load', 'action', 'load', 'workdir',
 				'wandb', 'tensorboard', 'details', 'data_file',
 				'variation', 'device', 'mode', 'autocast',
-				'healthcare', 'flash_attention', 'compile',
-				'init_weight', 'health',
+				'flash_attention', 'compile',
+				'init_weight',
 			)
 		else:
-			filters = ('data_load', 'load', 'iterations', 'autocast', 'health')
+			filters = ('data_load', 'load', 'iterations', 'autocast')
 		params = {}
 		for k in self.__data_dict__:
 			if k not in filters:
@@ -179,7 +178,7 @@ class Config:
 		'''
 
 		filters = (
-			'data_load', 'action', 'load', 'workdir', 'mode', 'health')
+			'data_load', 'action', 'load', 'workdir', 'mode')
 		for k in params:
 			if k not in filters:
 				self.__data_dict__[k] = params[k]

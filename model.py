@@ -21,9 +21,6 @@ class Data:
 		self.encode = lambda s: [self.stoi[x] for x in s]
 		self.decode = lambda e: ''.join([self.itos[x] for x in e])
 		data = torch.tensor(self.encode(text), dtype=torch.long)
-		# if config.device == 'cuda':
-		# 	data = data.pin_memory().to(config.device, non_blocking=True)
-
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
 		self.test_data = data[train_split:]
@@ -31,7 +28,7 @@ class Data:
 		self.batch_size = config.batch_size
 
 
-	def __len__(self):
+	def __len__(self) -> int:
 		return self.vocab_size
 
 
@@ -44,7 +41,6 @@ class Data:
 		batch_size = self.batch_size if batch_size == -1 else batch_size
 
 		data = self.train_data if split == 'train' else self.test_data
-		# From (block_size + 1) to block_size just in case
 		ix = torch.randint(len(data) - block_size, (batch_size,))
 		x = torch.stack([data[i:i + block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
@@ -59,15 +55,15 @@ class RMSNorm(nn.Module):
 		self.eps = eps
 		self.weight = nn.Parameter(torch.ones(dim))
 
-	def _norm(self, x):
+	def _norm(self, x) -> Tensor:
 		return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-	def forward(self, x):
+	def forward(self, x) -> Tensor:
 		output = self._norm(x.float()).type_as(x)
 		return (output * self.weight)
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> Tensor:
 	freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 	t = torch.arange(end, device=freqs.device)  # type: ignore
 	freqs = torch.outer(t, freqs).float()  # type: ignore
@@ -76,10 +72,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
 
 def apply_rotary_emb(
-	xq: torch.Tensor,
-	xk: torch.Tensor,
-	freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+	xq: Tensor,
+	xk: Tensor,
+	freqs_cis: Tensor,
+) -> Tuple[Tensor, Tensor]:
 
 	xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
 	xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
@@ -117,7 +113,11 @@ class CausalSelfAttention(nn.Module):
 			self.register_buffer('bias', torch.tril(torch.ones(self.block_size, self.block_size))
 										.view(1, 1, self.block_size, self.block_size))
 
-	def forward(self, x: Tensor, y: None, freqs_cis: Optional[Union[Tensor, None]] = None):
+	def forward(self,
+		x: Tensor,
+		y: None,
+		freqs_cis: Optional[Union[Tensor, None]] = None,
+		) -> Tuple[Tensor, None]:
 		B, T, C = x.size()
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
@@ -173,14 +173,14 @@ class CausalSelfAttention2(nn.Module):
 		self.group_t = (config.block_size // self.n_groups) # tokens per group
 		self.its_time = config.nlayers % 2 ^ ((self.idx + 1) % 2)
 
-	def do_att(self, q: Tensor, k: Tensor, v: Tensor, group: bool = False):
+	def do_att(self, q: Tensor, k: Tensor, v: Tensor, group: bool = False) -> Tensor:
 		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 			attn_mask=None,
 			dropout_p=config.dropout if (self.training and not group) else 0,
 			is_causal=True,
 		)
 
-	def do_block_merge(self, xblock: Tensor, x: Tensor):
+	def do_block_merge(self, xblock: Tensor, x: Tensor) -> Tensor:
 		other_blocks = torch.cat((xblock, x[:,:,1:,:]), dim=3)
 		first_block = torch.cat((x[:,:,:1], xblock[:,:,:1,-1:]), dim=3)
 		x = torch.cat((first_block, other_blocks), dim=2)
@@ -190,7 +190,7 @@ class CausalSelfAttention2(nn.Module):
 		x: Tensor,
 		y: Union[Tensor, None] = None,
 		freqs_cis: Union[Tensor, None] = None,
-	):
+	) -> Tensor:
 		B, T, C = x.size()
 		n_groups = min(T // self.group_t, self.n_groups)
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
@@ -369,8 +369,8 @@ class Transformer(nn.Module):
 
 		# Dynamic pos embedding
 		if self.pos_method == 'dynamic':
-			snip = x[:,:,:self.dim_snip].flatten(1) # (B, n)
-			snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
+			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
+			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
 			pos_emb = self.stack.dropout_pos(
 				snip_pad.unfold(1, self.dim, self.dim_snip),
 			) # (B, T, C)
