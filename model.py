@@ -21,8 +21,6 @@ class Data:
 		self.encode = lambda s: [self.stoi[x] for x in s]
 		self.decode = lambda e: ''.join([self.itos[x] for x in e])
 		data = torch.tensor(self.encode(text), dtype=torch.long)
-		# if config.device == 'cuda':
-		# 	data = data.pin_memory().to(config.device, non_blocking=True)
 
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
@@ -44,7 +42,6 @@ class Data:
 		batch_size = self.batch_size if batch_size == -1 else batch_size
 
 		data = self.train_data if split == 'train' else self.test_data
-		# From (block_size + 1) to block_size just in case
 		ix = torch.randint(len(data) - block_size, (batch_size,))
 		x = torch.stack([data[i:i + block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
@@ -106,7 +103,9 @@ class CausalSelfAttention(nn.Module):
 		self.pos_method = config.pos
 		self.hsize = self.dim // self.nheads
 		self.block_size = config.block_size
-
+		self.pos_win = config.pos_win
+		self.dim_snip = self.hsize // self.pos_win
+		self.dropout_pos = nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None
 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.attn_dropout = nn.Dropout(self.dropout)
@@ -117,7 +116,19 @@ class CausalSelfAttention(nn.Module):
 			self.register_buffer('bias', torch.tril(torch.ones(self.block_size, self.block_size))
 										.view(1, 1, self.block_size, self.block_size))
 
-	def forward(self, x: Tensor, y: None, freqs_cis: Optional[Union[Tensor, None]] = None):
+	def create_dype(self, x: Tensor) -> Tensor:
+		snip = x[:,:,:,:self.dim_snip].flatten(2) # (B, n)
+		snip = F.pad(snip, (self.hsize - self.dim_snip, 0), value=0) # (B, n+)
+		pos_emb = self.dropout_pos(
+			snip.unfold(2, self.hsize, self.dim_snip),
+		) # (B, T, C)
+		return pos_emb
+
+	def forward(self,
+		x: Tensor,
+		y: None,
+		freqs_cis: Optional[Union[Tensor, None]] = None,
+	) -> Tuple[Tensor, None]:
 		B, T, C = x.size()
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
@@ -143,7 +154,7 @@ class CausalSelfAttention(nn.Module):
 			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
 			att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
 			att = F.softmax(att, dim=-1)
-			# att = self.attn_dropout(att) # NOTE: my preference. it causes values of early tokens nan
+			att = self.attn_dropout(att)
 			y = att @ v
 		
 		y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -249,7 +260,7 @@ class NonLinear(nn.Module):
 		self.w3 = nn.Linear(4 * self.dim, self.dim, bias=config.bias)
 		self.dropout = nn.Dropout(config.dropout)
 
-	def forward(self, x: Tensor):
+	def forward(self, x: Tensor) -> Tensor:
 		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
 
@@ -299,7 +310,7 @@ class Transformer(nn.Module):
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
 			pos_embs=nn.Embedding(config.block_size, self.dim) if self.pos_method == 'learnable' else None,
 			dropout=nn.Dropout(config.dropout),
-			dropout_pos=nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None,
+			# dropout_pos=nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None,
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
 		))
@@ -369,10 +380,10 @@ class Transformer(nn.Module):
 
 		# Dynamic pos embedding
 		if self.pos_method == 'dynamic':
-			snip = x[:,:,:self.dim_snip].flatten(1) # (B, n)
-			snip_pad = F.pad(snip, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
+			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
+			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+). It considers itself too
 			pos_emb = self.stack.dropout_pos(
-				snip_pad.unfold(1, self.dim, self.dim_snip),
+				pos_emb.unfold(1, self.dim, self.dim_snip),
 			) # (B, T, C)
 		elif self.pos_method == 'learnable':
 			arange = torch.arange(T, device=seq.device)
