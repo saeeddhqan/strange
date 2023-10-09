@@ -51,3 +51,20 @@
 			# 	# betas=(config.beta1, config.beta2),
 			# 	fused=use_fused,
 			# )
+# addition accuracy(in generator function):
+		# try:
+		# 	dsplit = [(x.split('+')[0], x.split('+')[1].split('=')[0], int(x.split('=')[1])) for x in decoded.split('\n') if len(x) == 9]
+		# 	corr = 0
+		# 	accum = len(dsplit)
+		# 	for i in range(len(dsplit)):
+		# 		n1 = int(dsplit[i][0])
+		# 		n2 = int(dsplit[i][1])
+		# 		ans = dsplit[i][2]
+		# 		cor = n1 + n2
+		# 		if cor == ans:
+		# 			corr += 1
+		# 	if config.tensorboard:
+		# 		self.tensorboard_writer.add_scalar('accuracy', corr/accum, epoch, new_style=True)
+		# 	print('all=', accum, ',correct=', corr, ',accuracy=', corr/accum)
+		# except:
+		# 	pass
