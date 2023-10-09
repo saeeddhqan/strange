@@ -5,50 +5,30 @@ Contains main methods for training a model.
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import torch
-from torch import Tensor
-import torch.nn as nn
+from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
-import numpy as np
-import wandb
-import argparse
-import time
-import random
+import wandb, argparse, time, random, math, numpy, re
 import model
-import math
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
 
 
-
-def set_seed(seed):
+def set_seed(seed: int):
 	random.seed(seed)
-	np.random.seed(seed)
+	numpy.random.seed(seed)
 	torch.manual_seed(seed)
 	torch.cuda.manual_seed(seed)
 	torch.cuda.manual_seed_all(seed)
 
-
-def get_lr(epoch, warmup_iters=2000, lr_decay_iters=3250, min_lr=1e-4, lr=1e-3):
-	# 1) linear warmup for warmup_iters steps
-	if epoch < warmup_iters:
-		return lr
-	# 2) if it > lr_decay_iters, return min learning rate
-	if epoch > lr_decay_iters:
-		return min_lr
-	# 3) in between, use cosine decay down to min learning rate
-	decay_ratio = (epoch - warmup_iters) / (lr_decay_iters - warmup_iters)
-	assert 0 <= decay_ratio <= 1
-	coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-	return min_lr + coeff * (lr - min_lr)
 
 
 set_seed(1244)
 block_size = 64
 dim = 128
 params = {
-	'block_size': block_size, # It needs to be 256 for bench.
-	'lr': 5e-4, # Learning rate
-	'min_lr': 6e-5, # Min learning rate
+	'block_size': block_size,
+	'lr': 1e-3, # Learning rate
+	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
 	'beta2': 0.99,
 	'decay_lr': False,
@@ -58,10 +38,14 @@ params = {
 	'batch_size': 64,
 	'nlayers': 2,
 	'nheads': 4,
+	'ngroups': 8,
+	'pos_win': 8,
+	'accumulation_steps': 1,
 	'dropout': 0.1,
+	'dropout_pos': 0.1,
 	'dim': dim,
 	'weight_decay': 0.001,
-	'stop_loss': 1.4, # When can we stop training? once the stop_loss is <= n and once epochs are done.
+	'grad_clip': 1.0,
 	'vocab_size': 0,
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': 'stable', # When we change something, change this to distinguish different variations.
@@ -73,21 +57,23 @@ params = {
 	'data_load': None,
 	'wandb': False,
 	'tensorboard': False,
+	'save_checkpoint': False,
 	'parameters': None,
 	'details': '',
 	'compile': False,
-	'dtype': 'float32',
+	'dtype': 'float16',
 	'autocast': None,
 	'flash_attention': True,
 	'bias': False,
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
-	'layers_health': [],
+	'health': False, # Monitor gradients in tensorboard
+	'pos': 'rope', # rope, dynamic, learnable
+	'attention': 1,
 }
 
-# From nanoGPT
+
 def after_conf_init():
 	'''
 		boring
@@ -173,10 +159,10 @@ class Config:
 				'wandb', 'tensorboard', 'details', 'data_file',
 				'variation', 'device', 'mode', 'autocast',
 				'healthcare', 'flash_attention', 'compile',
-				'layers_health', 'layer_wise_lr', 'init_weight',
+				'init_weight', 'health',
 			)
 		else:
-			filters = ('data_load', 'load', 'iterations', 'autocast', 'layers_health', 'layer_wise_lr')
+			filters = ('data_load', 'load', 'iterations', 'autocast', 'health')
 		params = {}
 		for k in self.__data_dict__:
 			if k not in filters:
@@ -193,7 +179,7 @@ class Config:
 		'''
 
 		filters = (
-			'data_load', 'action', 'load', 'workdir', 'mode', 'layers_health', 'layer_wise_lr')
+			'data_load', 'action', 'load', 'workdir', 'mode', 'health')
 		for k in params:
 			if k not in filters:
 				self.__data_dict__[k] = params[k]
@@ -210,22 +196,24 @@ class ManageModel:
 		self.model = model
 		self.optimizer = None
 		self.loss = {}
+		self.best_loss = 1e9
 		self.elapsed_time = 0
+		self.scaler = None
 
 
-	def stop_criterion(self, test_loss: float) -> bool:
-		'''
-			Stop criterion.
-			Parameters
-			----------
-			test_loss: float
-				The test loss
-			Returns
-			-------
-			bool:
-				True if the stop criterion is met, False otherwise.
-		'''
-		return True if test_loss <= config.stop_loss else False
+	def get_lr(self, epoch, warmup_iters=2000, lr_decay_iters=3250):
+
+		if epoch < warmup_iters:
+			return config.lr # no warmup
+			# return lr * epoch / warmup_iters
+
+		if epoch > lr_decay_iters:
+			return config.min_lr
+
+		decay_ratio = (epoch - warmup_iters) / (lr_decay_iters - warmup_iters)
+		assert 0 <= decay_ratio <= 1
+		coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+		return config.min_lr + coeff * (config.lr - config.min_lr)
 
 
 	def load_model(self, path: str) -> NoReturn:
@@ -286,26 +274,36 @@ class ManageModel:
 				fused=use_fused,
 			)
 
+		posfix = config.pos if config.pos in ('learnable', 'rope') else \
+			f'{config.pos_win}w_{config.pos}_{config.dropout_pos * 100}pdo'
+
+		variation = f"{config.variation}_{config.attention}v_{config.nlayers}nl_\
+		{config.nheads}nh_{config.dim}d_{config.dropout}\
+		do_{config.block_size}bs_{int(config.deepnorm)}\
+		dn_{config.lr}lr_{int(config.decay_lr)}\
+		dlr_{config.ngroups}ng_{posfix}".strip().replace('\t', '').replace(' ', '')
+
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
-				comment='_' + config.variation,
+				comment='_' + variation,
 				filename_suffix='',
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
 				project='Wizard Cloak',
-				name=config.variation,
+				name=variation,
 				config=config.get_model_params(),
 			)
 		self.path_format = os.path.join(
 			config.workdir,
-			f"model_{config.variation}",
+			f"model_{variation}",
 		)
 
 		if config.wandb:
 			self.wandb_init.watch(self.model, log='all')
 
 		os.makedirs(config.workdir, exist_ok=True)
+		self.scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 
 
 	def pre_test(self) -> NoReturn:
@@ -318,7 +316,7 @@ class ManageModel:
 
 	def post_train(self) -> NoReturn:
 		'''
-			Tasks that relate to the after training happen here.
+			Tasks that relate to after training happen here.
 
 		'''
 		if config.tensorboard:
@@ -379,7 +377,7 @@ class ManageModel:
 	@torch.no_grad()
 	def test(self, epoch: int) -> NoReturn:
 		'''
-			Generate a sequence, calculate loss, and logging
+			Generate a sequence, calculate loss, and log
 			Parameters
 			----------
 			epoch: int
@@ -387,7 +385,7 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		seq, elapsed, elapsed_per_token = self.generator()
+		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
 		print(seq)
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
@@ -410,94 +408,66 @@ class ManageModel:
 		config.mode = state
 
 
-	def train_chunk(self, epoch: int) -> float:
-		'''
-			A method for getting a chunk of data, run the model on it, and do training steps.
-			Parameters
-			----------
-			epoch: int
-				epoch
-			Returns
-			-------
-			loss: float
-				training process loss
-		'''
-		epoch_loss = 0
-
-		if config.decay_lr:
-			lr = get_lr(
-				epoch + 1,
-				lr_decay_iters=config.iterations,
-				lr=config.lr,
-				min_lr=config.min_lr,
-			)
-
-			for param_group in self.optimizer.param_groups:
-				param_group['lr'] = lr
-
-		lr = config.lr if not config.decay_lr else lr
-
-		if config.health > 0:
-			config.layers_health = [{} for _ in range(config.nlayers)]
-
-		X, y = config.data_load.get_batch(epoch)
-		start = time.time()
-		with config.autocast:
-			pred, loss = self.model(X, y)
-		self.optimizer.zero_grad(set_to_none=True)
-		loss.backward()
-		torch.nn.utils.clip_grad_norm_(
-			self.model.parameters(),
-			1.0,
-		)
-
-		self.optimizer.step()
-		stop = time.time()
-		self.elapsed_time += stop - start
-
-		if config.health > 0:
-
-			self.net_health(epoch, lr)
-
-
-		return epoch_loss
-
-
-	def train_procedure(self, epoch: int) -> bool:
+	def train_procedure(self) -> NoReturn:
 		'''
 			Running one iteration.
 			Parameters
 			----------
-			epoch: int
-				epoch
 			Returns
 			-------
 			bool:
 				specifies whether the training should continue or not.
 		'''
-		test_cond = epoch % config.eval_step == config.eval_step - 1 # NOTE: no
-		self.train_chunk(epoch)
+		epoch = 0
+		X, Y = config.data_load.get_batch(epoch)
+		while True:
+			lr = self.get_lr(epoch + 1) if config.decay_lr else config.lr
 
-		# If it's not the right time to test the model.
-		if not test_cond:
-			return True
+			for param_group in self.optimizer.param_groups:
+				param_group['lr'] = lr
 
-		self.test(epoch)
 
-		path = self.path_format + f"_{epoch}.pt"
+			start = time.time()
+			for accum_step in range(config.accumulation_steps):
+				with config.autocast:
+					pred, loss = self.model(X, Y)
+					loss = loss / config.accumulation_steps
 
-		torch.save({
-			'model': self.model.state_dict(),
-			'optimizer': self.optimizer.state_dict(),
-			'config': config.get_model_params(),
-			'train_loss': self.loss['train'],
-			'test_loss': self.loss['test'],
-			'epoch': epoch,
-			}, path)
+				X, Y = config.data_load.get_batch(epoch)
+				self.scaler.scale(loss).backward()
 
-		if self.stop_criterion(self.loss['test']):
-			return False
-		return True
+
+			self.scaler.unscale_(self.optimizer)
+			torch.nn.utils.clip_grad_norm_(
+				self.model.parameters(),
+				config.grad_clip,
+			)
+
+			self.scaler.step(self.optimizer)
+			self.scaler.update()
+			self.optimizer.zero_grad(set_to_none=True)
+
+			stop = time.time()
+			self.elapsed_time += stop - start
+
+			# If it's the right time to test the model
+			if epoch % config.eval_step == config.eval_step - 1:
+				self.test(epoch)
+				if config.save_checkpoint or self.loss['test'] < self.best_loss:
+					self.best_loss = self.loss['test']
+					torch.save({
+						'model': self.model.state_dict(),
+						'optimizer': self.optimizer.state_dict(),
+						'config': config.get_model_params(),
+						'train_loss': self.loss['train'],
+						'test_loss': self.loss['test'],
+						'epoch': epoch,
+						}, self.path_format + f"_{epoch}.pt")
+
+			epoch += 1
+
+			if epoch > config.iterations:
+				break
 
 
 	def train(self) -> NoReturn:
@@ -507,20 +477,16 @@ class ManageModel:
 
 		self.pre_train()
 
-		for epoch in range(config.iterations):
-			try:
-				if not self.train_procedure(epoch):
-					print(f"The test loss is <= {config.stop_loss}. Stopping...")
-					break
-			except KeyboardInterrupt:
-				print(f"Keyboard interrupt at epoch {epoch}.")
-				break
+		try:
+			self.train_procedure()
+		except KeyboardInterrupt:
+			print(f"Keyboard interrupt.")
 
 		self.post_train()
 
 
 	@torch.no_grad()
-	def generator(self, seq_len: int = 100) -> tuple[str, float, float]:
+	def generator(self, seq_len: int = 100, epoch: int = 0) -> tuple[str, float, float]:
 		'''
 			Generate a sequence with seq_len length and return it
 			along with time elapsed.
@@ -540,14 +506,15 @@ class ManageModel:
 		self.pre_test()
 
 		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
+
 		start = time.time()
+
 		with config.autocast:
 			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
 		end = time.time()
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
 		took_per_token = took / len(decoded)
-
 		self.post_test()
 
 		return decoded, took, took_per_token
@@ -568,17 +535,15 @@ if __name__ == '__main__':
 	parser.add_argument('--min-lr', '-ml', type=float, default=config.min_lr, help=f"minimum learning rate, default {config.min_lr}")
 	parser.add_argument('--dropout', '-do', type=float, default=config.dropout, help=f"dropout prob, default {config.dropout}")
 	parser.add_argument('--nlayers', '-nl', type=int, default=config.nlayers, help=f"number of blocks, default {config.nlayers}")
-	parser.add_argument('--num-heads', '-nh', type=int, default=config.nheads, help=f"number of heads, default {config.nheads}")
+	parser.add_argument('--nheads', '-nh', type=int, default=config.nheads, help=f"number of heads, default {config.nheads}")
 	parser.add_argument('--dim', '-d', type=int, default=config.dim, help=f"embedding size, default {config.dim}")
 	parser.add_argument('--block-size', '-bs', type=int, default=config.block_size, help=f"length input sequence, default {config.block_size}")
 	parser.add_argument('--batch-size', '-b', type=int, default=config.batch_size, help=f"batch size, default {config.batch_size}")
-	parser.add_argument('--health', type=int, default=config.health, help=f"1 for logging vector's norm, 2 for 1 + gradient and weight norm, default {config.health}")
 	parser.add_argument('--topk', type=int, default=config.topk, help=f"topk sampling, default {config.topk}")
-	parser.add_argument('--stop-loss', type=float, default=config.stop_loss, help=f"training stops when test loss is <= a treshold, default {config.stop_loss}")
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help=f"use wandb for visualization, default {config.wandb}")
 	parser.add_argument('--tensorboard', action='store_true', default=config.tensorboard, help=f"use tensorboard for visualization, default {config.tensorboard}")
 	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"compile the model for faster training, default {config.compile}")
-	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"weigth decay, default {config.decay_lr}")
+	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"decay learning rate, default {config.decay_lr}")
 	parser.add_argument('--deepnorm', action='store_true', default=config.deepnorm, help=f"use deep layer normalizer, default {config.deepnorm}")
 	args = parser.parse_args()
 
