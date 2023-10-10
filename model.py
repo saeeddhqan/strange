@@ -143,7 +143,7 @@ class CausalSelfAttention(nn.Module):
 			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
 			att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
 			att = F.softmax(att, dim=-1)
-			# att = self.attn_dropout(att) # NOTE: my preference. it causes values of early tokens nan
+			# att = self.attn_dropout(att)
 			y = att @ v
 		
 		y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -372,7 +372,7 @@ class Transformer(nn.Module):
 			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
 			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
 			pos_emb = self.stack.dropout_pos(
-				pos_emb.unfold(1, self.dim, self.dim_snip),
+				pos_emb.unfold(1, self.dim, self.dim_snip) * 0.5,
 			) # (B, T, C)
 		elif self.pos_method == 'learnable':
 			arange = torch.arange(T, device=seq.device)

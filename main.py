@@ -42,13 +42,13 @@ params = {
 	'pos_win': 8,
 	'accumulation_steps': 1,
 	'dropout': 0.1,
-	'dropout_pos': 0.0,
+	'dropout_pos': 0.05,
 	'dim': dim,
 	'weight_decay': 0.001,
 	'grad_clip': 1.0,
 	'vocab_size': 0,
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-	'variation': 'stable', # When we change something, change this to distinguish different variations.
+	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
 	'data_file': 'data/shakespeare.txt',
 	'load': '',
