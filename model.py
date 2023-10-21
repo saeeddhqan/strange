@@ -287,13 +287,14 @@ class Transformer(nn.Module):
 		super().__init__()
 		self.dim = config.dim
 		self.pos_method = config.pos
-		self.freqs_cis = None
 		self.ngroups = config.ngroups
 		self.pos_win = config.pos_win
 		self.dim_snip = self.dim // self.pos_win
 
 		if self.pos_method == 'rope':
-			self.freqs_cis = precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2) # double for making it dynamism
+			self.register_buffer('freqs_cis', precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2)) # double for making it dynamism
+		else:
+			self.freqs_cis = None
 
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
@@ -307,6 +308,7 @@ class Transformer(nn.Module):
 		self.alpha = 1.0 if not config.deepnorm else math.pow(2.0 * config.nlayers, 0.25)
 		self.blocks = nn.ModuleList([Block(idx, self.alpha) for idx in range(config.nlayers)])
 		self.stack.tok_embs.weight = self.stack.lm_head.weight
+		self.pos_coef = nn.Parameter(torch.tensor(data=0.5)) if self.pos_method == 'dynamic' else None
 
 		self.apply(self.norm_weights)
 		if config.deepnorm:
@@ -372,7 +374,7 @@ class Transformer(nn.Module):
 			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
 			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
 			pos_emb = self.stack.dropout_pos(
-				pos_emb.unfold(1, self.dim, self.dim_snip) * 0.5,
+				pos_emb.unfold(1, self.dim, self.dim_snip) * self.pos_coef,
 			) # (B, T, C)
 		elif self.pos_method == 'learnable':
 			arange = torch.arange(T, device=seq.device)
