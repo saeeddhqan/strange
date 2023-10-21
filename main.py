@@ -68,7 +68,7 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'pos': 'learnable', # rope, dynamic, learnable
+	'pos': 'rope', # rope, dynamic, learnable
 	'attention': 1,
 }
 
@@ -356,7 +356,8 @@ class ManageModel:
 		'''
 
 		self.model.eval()
-
+		state = config.mode
+		config.mode = 'test'
 		out = {}
 		for split in ('train', 'test'):
 			# A tensor to capture the losses
@@ -369,7 +370,7 @@ class ManageModel:
 			out[split] = losses.mean()
 
 		self.model.train()
-
+		config.mode = state
 		return out
 
 
@@ -451,7 +452,6 @@ class ManageModel:
 
 			# If it's the right time to test the model
 			if epoch % config.eval_step == config.eval_step - 1:
-				config.mode = 'inference'
 				self.test(epoch)
 				if config.save_checkpoint or self.loss['test'] < self.best_loss:
 					self.best_loss = self.loss['test']
@@ -463,12 +463,12 @@ class ManageModel:
 						'test_loss': self.loss['test'],
 						'epoch': epoch,
 						}, self.path_format + f"_{epoch}.pt")
-				config.mode = 'train'
+
 			epoch += 1
 
 			if epoch > config.iterations:
 				break
-
+		print(self.model.pos_coef)
 
 	def train(self) -> NoReturn:
 		'''
@@ -504,17 +504,19 @@ class ManageModel:
 				elapsed time to generate each token
 		'''
 		self.pre_test()
+		state = config.mode
+		config.mode = 'inference'
 
 		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
-
 		start = time.time()
-
 		with config.autocast:
 			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
 		end = time.time()
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
 		took_per_token = took / len(decoded)
+
+		config.mode = state
 		self.post_test()
 
 		return decoded, took, took_per_token
