@@ -50,7 +50,7 @@ class Data:
 class RMSNorm(nn.Module):
 	def __init__(self,
 		dim: int, eps: float = 1e-5,
-	):
+	) -> NoReturn:
 		super().__init__()
 		self.eps = eps
 		self.weight = nn.Parameter(torch.ones(dim))
@@ -93,7 +93,7 @@ def apply_rotary_emb(
 
 
 class CausalSelfAttention(nn.Module):
-	def __init__(self, idx: int):
+	def __init__(self, idx: int) -> NoReturn:
 		super().__init__()
 		assert config.dim % config.nheads == 0, 'embeds size is not divisible to the num_heads'
 		self.dim = config.dim
@@ -117,7 +117,7 @@ class CausalSelfAttention(nn.Module):
 		x: Tensor,
 		y: None,
 		freqs_cis: Optional[Union[Tensor, None]] = None,
-		) -> Tuple[Tensor, None]:
+	) -> Tuple[Tensor, None]:
 		B, T, C = x.size()
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
@@ -153,7 +153,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class CausalSelfAttention2(nn.Module):
-	def __init__(self, idx: int):
+	def __init__(self, idx: int) -> NoReturn:
 		super().__init__()
 		assert config.dim % config.nheads == 0, 'embeds size is not divisible to the nheads'
 		self.idx = idx
@@ -174,7 +174,7 @@ class CausalSelfAttention2(nn.Module):
 		self.its_time = config.nlayers % 2 ^ ((self.idx + 1) % 2)
 
 	def do_att(self, q: Tensor, k: Tensor, v: Tensor, group: bool = False) -> Tensor:
-		return torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+		return F.scaled_dot_product_attention(q, k, v, 
 			attn_mask=None,
 			dropout_p=config.dropout if (self.training and not group) else 0,
 			is_causal=True,
@@ -190,12 +190,12 @@ class CausalSelfAttention2(nn.Module):
 		x: Tensor,
 		y: Union[Tensor, None] = None,
 		freqs_cis: Union[Tensor, None] = None,
-	) -> Tensor:
+	) -> Tuple[Tensor, Union[Tensor, None]]:
 		B, T, C = x.size()
 		n_groups = min(T // self.group_t, self.n_groups)
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 		
-		if self.pos_emb == 'rope':
+		if self.pos_method == 'rope':
 			q = q.view(B, T, self.n_head, self.hsize)
 			k = k.view(B, T, self.n_head, self.hsize)
 			q, k = apply_rotary_emb(q, k, freqs_cis)
@@ -241,7 +241,7 @@ class CausalSelfAttention2(nn.Module):
 
 
 class NonLinear(nn.Module):
-	def __init__(self):
+	def __init__(self) -> NoReturn:
 		super().__init__()
 		self.dim = config.dim
 		self.w1 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias)
@@ -249,7 +249,7 @@ class NonLinear(nn.Module):
 		self.w3 = nn.Linear(4 * self.dim, self.dim, bias=config.bias)
 		self.dropout = nn.Dropout(config.dropout)
 
-	def forward(self, x: Tensor):
+	def forward(self, x: Tensor) -> Tensor:
 		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
 
@@ -278,7 +278,7 @@ class Block(nn.Module):
 
 		head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis=freqs_cis)
 		head_out = x + head_out
-		hidden_state = head_out + self.ffn(self.ln2(head_out))
+		hidden_state = head_out + self. alpha * self.ffn(self.ln2(head_out))
 		return hidden_state, y
 
 
@@ -307,7 +307,9 @@ class Transformer(nn.Module):
 
 		self.alpha = 1.0 if not config.deepnorm else math.pow(2.0 * config.nlayers, 0.25)
 		self.blocks = nn.ModuleList([Block(idx, self.alpha) for idx in range(config.nlayers)])
+
 		self.stack.tok_embs.weight = self.stack.lm_head.weight
+
 		self.pos_coef = nn.Parameter(torch.tensor(data=0.5)) if self.pos_method == 'dynamic' else None
 
 		self.apply(self.norm_weights)
@@ -320,7 +322,7 @@ class Transformer(nn.Module):
 		print("Number of parameters: %.2fM" % (self.count_params,))
 
 
-	def _deepnorm(self):
+	def _deepnorm(self) -> NoReturn:
 		'''
 			https://arxiv.org/pdf/2203.00555.pdf
 		'''

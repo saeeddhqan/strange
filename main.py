@@ -30,7 +30,7 @@ params = {
 	'lr': 1e-3, # Learning rate
 	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
-	'beta2': 0.99,
+	'beta2': 0.999, # The less, the more stable
 	'decay_lr': False,
 	'eval_step': 250, # Every n step, we do an evaluation.
 	'iterations': 5000, # Like epochs
@@ -112,11 +112,13 @@ class Config:
 		else:
 			raise ValueError(f"'{k}' does not exist.")
 
+
 	def __setattr__(self, k: Union[int, str, bytes], v: Any) -> NoReturn:
 		if k == '__data_dict__':
 			super().__setattr__(k, v)
 		else:
 			self.__data_dict__[k] = v
+
 
 	def __delattr__(self, k: Union[int, str, bytes]) -> NoReturn:
 		'''
@@ -131,6 +133,7 @@ class Config:
 		else:
 			raise ValueError(f"'{k}' does not exist.")
 
+
 	def set_args(self, args: argparse.Namespace) -> NoReturn:
 		'''
 			Given an object of argparse, the method adds all the KVs to the data.
@@ -143,6 +146,7 @@ class Config:
 			k,v = kv
 			self.__setattr__(k, v)
 		after_conf_init()
+
 
 	def get_model_params(self, abstract: bool = False) -> dict:
 		'''
@@ -167,6 +171,7 @@ class Config:
 			if k not in filters:
 				params[k] = self.__data_dict__[k]
 		return params
+
 
 	def set_model_params(self, params: dict) -> NoReturn:
 		'''
@@ -269,18 +274,21 @@ class ManageModel:
 				self.model.parameters(),
 				lr=config.lr,
 				# amsgrad=True, # Found amsgrad better.
-				# betas=(config.beta1, config.beta2),
+				betas=(config.beta1, config.beta2),
+				weight_decay=config.weight_decay,
 				fused=use_fused,
 			)
 
 		posfix = config.pos if config.pos in ('learnable', 'rope') else \
-			f'{config.pos_win}w_{config.pos}_{config.dropout_pos * 100}pdo'
+			f'{config.pos_win}w_{config.pos}_{config.dropout_pos}pdo'
 
-		variation = f"{config.variation}_{config.attention}v_{config.nlayers}nl_\
+		ver = 'vanilla' if config.attention == 1 else f'group_{config.ngroups}ng'
+
+		variation = f"{config.variation}_{ver}_{config.nlayers}nl_\
 		{config.nheads}nh_{config.dim}d_{config.dropout}\
 		do_{config.block_size}bs_{int(config.deepnorm)}\
 		dn_{config.lr}lr_{int(config.decay_lr)}\
-		dlr_{config.ngroups}ng_{posfix}".strip().replace('\t', '').replace(' ', '')
+		dlr_{posfix}".strip().replace('\t', '').replace(' ', '')
 
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
@@ -389,19 +397,27 @@ class ManageModel:
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
+
 		self.loss = self.calculate_loss(config.block_size)
-		test_loss = round(self.loss['test'].item(), 4)
-		train_loss = round(self.loss['train'].item(), 4)
-		print(f"[{epoch}] > train: {train_loss}, test: {test_loss}")
+		test_loss = round(self.loss['test'].item(), 5)
+		train_loss = round(self.loss['train'].item(), 5)
+		test_pp = round(torch.exp(self.loss['test']).item(), 5)
+		train_pp = round(torch.exp(self.loss['train']).item(), 5)
+
+		print(f"[{epoch}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
 		print('-' * 30)
 		if config.tensorboard:
 			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
 			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar('train_pp', train_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar('test_pp', test_loss, epoch, new_style=True)
 			self.tensorboard_writer.flush()
 		if config.wandb:
 			wandb.log({
 				'train/loss': train_loss,
 				'test/loss': test_loss,
+				'train/perplexity': train_pp,
+				'test/perplexity': test_pp,
 				'iter': epoch,
 			})
 		config.mode = state
