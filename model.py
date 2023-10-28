@@ -10,20 +10,27 @@ config = None
 
 class Data:
 	def __init__(self, config: ClassVar) -> NoReturn:
-		with open(config.data_file) as fp:
-			text = fp.read()
+		split = 8
+		data = torch.tensor([])
+		for chunk in range(split + 1):
+			data = torch.cat((data, torch.load(f'{config.data_file}_p{chunk}.pt')))
+		self.docs = torch.load(config.docs_file).to(torch.long)
+		data = data.to(torch.long)
 
-		self.chars = sorted(list(set(text)))
-		self.vocab_size = len(self.chars)
+		model = 'mistralai/Mistral-7B-v0.1'
+		self.tokenizer = AutoTokenizer.from_pretrained(model)
+
+		self.encode = self.tokenizer.encode
+		self.decode = lambda seq: self.tokenizer.decode(seq, skip_special_tokens=True)
+
+		self.vocab_size = self.tokenizer.vocab_size
 		config.vocab_size = self.vocab_size
-		self.stoi = {c:i for i,c in enumerate(self.chars)}
-		self.itos = {i:c for c,i in self.stoi.items()}
-		self.encode = lambda s: [self.stoi[x] for x in s]
-		self.decode = lambda e: ''.join([self.itos[x] for x in e])
-		data = torch.tensor(self.encode(text), dtype=torch.long)
+
 		train_split = int(0.9 * len(data))
+
 		self.train_data = data[:train_split]
 		self.test_data = data[train_split:]
+
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
 
@@ -44,7 +51,9 @@ class Data:
 		ix = torch.randint(len(data) - block_size, (batch_size,))
 		x = torch.stack([data[i:i + block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
-		return x.pin_memory().to(config.device, non_blocking=True), y.pin_memory().to(config.device, non_blocking=True)
+		return (x.pin_memory().to(config.device, non_blocking=True),
+				y.pin_memory().to(config.device, non_blocking=True),
+		)
 
 
 class RMSNorm(nn.Module):
@@ -345,7 +354,7 @@ class Transformer(nn.Module):
 
 
 	def norm_weights(self, module):
-		if isinstance(module, nn.Linear) and not config.deepnorm:
+		if isinstance(module, nn.Linear):
 			if config.init_weight == 'normal_':
 				nn.init.normal_(module.weight, mean=0.0, std=0.02)
 			else:

@@ -17,8 +17,8 @@ set_seed()
 
 block_size = 64
 nheads = 4
-nlayers = 4
-dim = 128
+nlayers = 64
+dim = 64
 bias = False
 
 
@@ -42,9 +42,9 @@ class NonLinear(nn.Module):
 	def __init__(self):
 		super().__init__()
 		self.dim = dim
-		self.w1 = nn.Linear(self.dim, 4 * self.dim, bias=bias) # bias=False in llama
-		self.w2 = nn.Linear(4 * self.dim, self.dim, bias=bias) # bias=False in llama
-		self.w3 = nn.Linear(self.dim, 4 * self.dim, bias=bias) # bias=False in llama
+		self.w1 = nn.Linear(self.dim, 4 * self.dim, bias=bias)
+		self.w2 = nn.Linear(4 * self.dim, self.dim, bias=bias)
+		self.w3 = nn.Linear(self.dim, 4 * self.dim, bias=bias)
 
 	def forward(self, x: Tensor):
 		'''
@@ -68,7 +68,7 @@ class CausalSelfAttention(nn.Module):
 		self.register_buffer('bias', torch.tril(torch.ones(block_size, block_size))
 									.view(1, 1, block_size, block_size))
 
-	def forward(self, x):
+	def forward(self, x, y):
 		B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
 		# calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -87,7 +87,7 @@ class CausalSelfAttention(nn.Module):
 
 		# output projection
 		y = self.resid_dropout(self.c_proj(y))
-		return y
+		return y, None
 
 
 class CausalSelfAttention2(nn.Module):
@@ -98,7 +98,6 @@ class CausalSelfAttention2(nn.Module):
 		self.dim = dim
 		self.nheads = nheads
 		self.hsize = self.dim // self.nheads
-		# self.v_attn = nn.Linear(self.dim, self.dim, bias=bias)
 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=bias)
 		self.dropout = 0.0
@@ -129,8 +128,7 @@ class CausalSelfAttention2(nn.Module):
 		'''
 		B, T, C = x.size()
 		n_groups = min(T // self.group_t, self.n_groups)
-		v = F.silu(self.v_attn(x))
-		q, k  = self.c_attn(v).split(self.dim, dim=2)
+		q, k, v = self.c_attn(x).split(self.dim, dim=2)
 
 		# change shape (B, T, C) to (B, nh, ng, pg, C)
 		q = q.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
@@ -272,20 +270,12 @@ class Block(nn.Module):
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
-		# self.rescon1 = nn.Parameter(torch.ones(1, 1, self.dim))
-		# self.rescon2 = nn.Parameter(torch.ones(1, 1, self.dim))
+		self.alpha = math.pow(2.0 * nlayers, 0.25)
 
 	def forward(self, x, y):
-		# hidden_state = hidden_state + self.heads(self.ln1(hidden_state))
-		# hidden_state, y = self.heads(self.ln1(x), y)
-		hidden_state, y1 = self.heads(self.ln1(x), y)
-		hidden_state2, y2 = self.heads.forward2(self.ln1(x), y)
-		# hidden_state = self.rescon1 * x + hidden_state 
-		# hidden_state = self.rescon2 * hidden_state + self.ffn(self.ln2(hidden_state))
-		print(hidden_state[0,0])
-		print(y1[0][0,0,0])
-		print(hidden_state2[0,0])
-		print(y2[0][0,0,0])
+		head_out, y1 = self.heads(self.ln1(x), y)
+		head_out = x + head_out
+		hidden_state = head_out + self.ffn(self.ln2(head_out))
 		return hidden_state, y1
 
 
@@ -294,6 +284,27 @@ class layers(nn.Module):
 		super().__init__()
 		self.layers = nn.ModuleList([Block(idx) for idx in range(nlayers)])
 		self.ln = RMSNorm(dim)
+		self.apply(self.norm_weights)
+
+		# for name, p in self.named_parameters():
+		# 	if (
+		# 		'w1' in name
+		# 		or 'w2' in name
+		# 		or 'w3' in name
+		# 		or 'c_proj' in name
+		# 		or 'c_attn' in name
+		# 	):
+		# 		p.data.div_(math.pow(8.0 * nlayers, 0.25))
+
+
+	def norm_weights(self, module):
+		if isinstance(module, nn.Linear):
+			if True:
+				nn.init.normal_(module.weight, mean=0.0, std=0.04)
+			else:
+				nn.init.xavier_uniform_(module.weight, gain=1 / math.sqrt(2))
+			if module.bias is not None:
+				 nn.init.constant_(module.bias, 0.001)
 
 	def forward(self, x):
 		y = None
@@ -307,7 +318,9 @@ class layers(nn.Module):
 # a(b)
 ##################################################################
 a = layers().cuda()
+a.eval()
 complete = torch.rand(64, block_size, dim).cuda()
+nn.init.normal_(complete, mean=0.0, std=0.02)
 a(complete)
 print('passed complete')
 # arbit = torch.rand(3, 50, dim).cuda()

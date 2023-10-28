@@ -35,12 +35,12 @@ params = {
 	'eval_step': 250, # Every n step, we do an evaluation.
 	'iterations': 5000, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
-	'batch_size': 64,
+	'batch_size': 128,
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
 	'pos_win': 8,
-	'accumulation_steps': 1,
+	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'dropout_pos': 0.05,
 	'dim': dim,
@@ -50,7 +50,7 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/shakespeare.txt',
+	'data_file': 'data/politic100k',
 	'load': '',
 	'action': 'train',
 	'mode': 'train',
@@ -66,7 +66,7 @@ params = {
 	'flash_attention': True,
 	'bias': False,
 	'deepnorm': False,
-	'init_weight': 'xavier',
+	'init_weight': 'normal_',
 	'topk': -1,
 	'pos': 'dynamic', # rope, dynamic, learnable
 	'attention': 2,
