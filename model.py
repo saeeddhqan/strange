@@ -278,7 +278,7 @@ class Block(nn.Module):
 
 		head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis=freqs_cis)
 		head_out = x + head_out
-		hidden_state = head_out + self. alpha * self.ffn(self.ln2(head_out))
+		hidden_state = head_out * self.alpha + self.ffn(self.ln2(head_out))
 		return hidden_state, y
 
 
@@ -310,8 +310,7 @@ class Transformer(nn.Module):
 
 		self.stack.tok_embs.weight = self.stack.lm_head.weight
 
-		self.pos_coef = nn.Parameter(torch.tensor(data=0.5)) if self.pos_method == 'dynamic' else None
-
+		self.pos_coef = nn.Parameter(torch.tensor(data=0.4)) if self.pos_method == 'dynamic' else None
 		self.apply(self.norm_weights)
 		if config.deepnorm:
 			self._deepnorm()

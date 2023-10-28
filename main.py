@@ -69,7 +69,7 @@ params = {
 	'init_weight': 'xavier',
 	'topk': -1,
 	'pos': 'dynamic', # rope, dynamic, learnable
-	'attention': 1,
+	'attention': 2,
 }
 
 
