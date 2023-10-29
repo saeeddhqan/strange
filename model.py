@@ -119,8 +119,7 @@ class CausalSelfAttention(nn.Module):
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.attn_dropout = nn.Dropout(self.dropout)
 		self.resid_dropout = nn.Dropout(self.dropout)
-		self.qpos_coef = nn.Parameter(torch.tensor(data=0.6)) if self.pos_method == 'dynamic' else None
-		self.kpos_coef = nn.Parameter(torch.tensor(data=0.6)) if self.pos_method == 'dynamic' else None
+		self.pos_coef = nn.Parameter(torch.tensor(data=0.6)) if self.pos_method == 'dynamic' else None
 		self.flash = config.flash_attention
 		if not self.flash:
 			self.register_buffer('bias', torch.tril(torch.ones(self.block_size, self.block_size))
@@ -133,6 +132,7 @@ class CausalSelfAttention(nn.Module):
 			snip.unfold(2, self.hsize, self.dim_snip),
 		) # (B, T, C)
 		return pos_emb
+
 
 	def forward(self,
 		x: Tensor,
@@ -154,8 +154,8 @@ class CausalSelfAttention(nn.Module):
 			q = q.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 			v = v.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 			if self.pos_method == 'dynamic':
-				q = q + (self.create_dype(q) * self.qpos_coef)
-				k = k + (self.create_dype(k) * self.kpos_coef)
+				q = q + (self.create_dype(q) * self.pos_coef)
+				k = k + (self.create_dype(k) * self.pos_coef)
 
 		if self.flash:
 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
