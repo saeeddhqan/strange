@@ -14,7 +14,6 @@ class Data:
 		data = torch.tensor([])
 		for chunk in range(split + 1):
 			data = torch.cat((data, torch.load(f'{config.data_file}_p{chunk}.pt')))
-		self.docs = torch.load(config.docs_file).to(torch.long)
 		data = data.to(torch.long)
 
 		model = 'mistralai/Mistral-7B-v0.1'
