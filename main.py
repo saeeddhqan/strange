@@ -392,34 +392,37 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
+		default_block = config.block_size
 		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
 		print(seq)
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
+		for i in range(1, 3):
+			config.block_size = default_block * i
+			self.loss = self.calculate_loss(config.block_size)
+			test_loss = round(self.loss['test'].item(), 5)
+			train_loss = round(self.loss['train'].item(), 5)
+			test_pp = round(torch.exp(self.loss['test']).item(), 5)
+			train_pp = round(torch.exp(self.loss['train']).item(), 5)
 
-		self.loss = self.calculate_loss(config.block_size)
-		test_loss = round(self.loss['test'].item(), 5)
-		train_loss = round(self.loss['train'].item(), 5)
-		test_pp = round(torch.exp(self.loss['test']).item(), 5)
-		train_pp = round(torch.exp(self.loss['train']).item(), 5)
-
-		print(f"[{epoch}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
-		print('-' * 30)
-		if config.tensorboard:
-			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('train_pp', train_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('test_pp', test_loss, epoch, new_style=True)
-			self.tensorboard_writer.flush()
-		if config.wandb:
-			wandb.log({
-				'train/loss': train_loss,
-				'test/loss': test_loss,
-				'train/perplexity': train_pp,
-				'test/perplexity': test_pp,
-				'iter': epoch,
-			})
+			print(f"[{epoch}][{config.block_size}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
+			print('-' * 30)
+			if config.tensorboard:
+				self.tensorboard_writer.add_scalar(f'train_loss_{config.block_size}', train_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'test_loss_{config.block_size}', test_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'train_pp_{config.block_size}', train_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'test_pp__{config.block_size}', test_loss, epoch, new_style=True)
+				self.tensorboard_writer.flush()
+			if config.wandb:
+				wandb.log({
+					f'train/loss_{config.block_size}': train_loss,
+					f'test/loss_{config.block_size}': test_loss,
+					f'train/perplexity_{config.block_size}': train_pp,
+					f'test/perplexity_{config.block_size}': test_pp,
+					'iter': epoch,
+				})
+		config.block_size = default_block
 		config.mode = state
 
 
