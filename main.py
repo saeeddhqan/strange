@@ -297,7 +297,7 @@ class ManageModel:
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
-				project='Wizard Cloak',
+				project='Bench',
 				name=variation,
 				config=config.get_model_params(),
 			)

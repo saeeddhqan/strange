@@ -103,7 +103,7 @@ def apply_rotary_emb(
 
 
 class CausalSelfAttention(nn.Module):
-	def __init__(self, idx: int) -> NoReturn:
+	def __init__(self, idx: int):
 		super().__init__()
 		assert config.dim % config.nheads == 0, 'embeds size is not divisible to the num_heads'
 		self.dim = config.dim
@@ -112,16 +112,27 @@ class CausalSelfAttention(nn.Module):
 		self.pos_method = config.pos
 		self.hsize = self.dim // self.nheads
 		self.block_size = config.block_size
-
+		self.pos_win = config.pos_win
+		self.dim_snip = self.hsize // self.pos_win
+		self.dropout_pos = nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None
 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.attn_dropout = nn.Dropout(self.dropout)
 		self.resid_dropout = nn.Dropout(self.dropout)
-
+		self.qpos_coef = nn.Parameter(torch.tensor(data=0.6)) if self.pos_method == 'dynamic' else None
+		self.kpos_coef = nn.Parameter(torch.tensor(data=0.6)) if self.pos_method == 'dynamic' else None
 		self.flash = config.flash_attention
 		if not self.flash:
 			self.register_buffer('bias', torch.tril(torch.ones(self.block_size, self.block_size))
 										.view(1, 1, self.block_size, self.block_size))
+
+	def create_dype(self, x: Tensor) -> Tensor:
+		snip = x[:,:,:,:self.dim_snip].flatten(2) # (B, n)
+		snip = F.pad(snip, (self.hsize - self.dim_snip, 0), value=0) # (B, n+)
+		pos_emb = self.dropout_pos(
+			snip.unfold(2, self.hsize, self.dim_snip),
+		) # (B, T, C)
+		return pos_emb
 
 	def forward(self,
 		x: Tensor,
@@ -142,6 +153,9 @@ class CausalSelfAttention(nn.Module):
 			k = k.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 			q = q.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 			v = v.view(B, T, self.nheads, self.hsize).transpose(1, 2)
+			if self.pos_method == 'dynamic':
+				q = q + (self.create_dype(q) * self.qpos_coef)
+				k = k + (self.create_dype(k) * self.kpos_coef)
 
 		if self.flash:
 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
@@ -320,7 +334,8 @@ class Transformer(nn.Module):
 
 		self.stack.tok_embs.weight = self.stack.lm_head.weight
 
-		self.pos_coef = nn.Parameter(torch.tensor(data=0.4)) if self.pos_method == 'dynamic' else None
+		# self.pos_coef = nn.Parameter(torch.tensor(data=1.0)) if self.pos_method == 'dynamic' else None
+		# self.tok_coef = nn.Parameter(torch.tensor(data=1.0)) if self.pos_method == 'dynamic' else None
 		self.apply(self.norm_weights)
 		if config.deepnorm:
 			self._deepnorm()
@@ -381,17 +396,18 @@ class Transformer(nn.Module):
 		x = self.stack.tok_embs(seq) # (B,T,C)
 
 		# Dynamic pos embedding
-		if self.pos_method == 'dynamic':
-			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
-			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
-			pos_emb = self.stack.dropout_pos(
-				pos_emb.unfold(1, self.dim, self.dim_snip) * self.pos_coef,
-			) # (B, T, C)
-		elif self.pos_method == 'learnable':
-			arange = torch.arange(T, device=seq.device)
-			pos_emb = self.stack.pos_embs(arange)
+		# if self.pos_method == 'dynamic':
+		# 	pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
+		# 	pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
+		# 	pos_emb = self.stack.dropout_pos(
+		# 		pos_emb.unfold(1, self.dim, self.dim_snip) * self.pos_coef,
+		# 	) # (B, T, C)
+		# 	x = x * self.tok_coef
+		# elif self.pos_method == 'learnable':
+		# 	arange = torch.arange(T, device=seq.device)
+		# 	pos_emb = self.stack.pos_embs(arange)
 
-		x = x + pos_emb if self.pos_method != 'rope' else x
+		# x = x + pos_emb if self.pos_method != 'rope' else x
 
 		freqs_cis = None if self.pos_method != 'rope' else self.freqs_cis[:T].to(seq.device)
 		x = self.stack.dropout(x)
