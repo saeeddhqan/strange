@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
+from transformers import AutoTokenizer 
+
 import math
 
 
