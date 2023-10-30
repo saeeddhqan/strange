@@ -20,9 +20,8 @@ def set_seed(seed: int):
 	torch.cuda.manual_seed(seed)
 	torch.cuda.manual_seed_all(seed)
 
-
-
 set_seed(1244)
+
 block_size = 64
 dim = 128
 params = {
@@ -393,6 +392,7 @@ class ManageModel:
 		state = config.mode
 		config.mode = 'inference'
 		default_block = config.block_size
+		default_freqs = self.model.freqs_cis
 		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
 		print(seq)
 		print('-' * 10)
@@ -400,6 +400,8 @@ class ManageModel:
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
 		for i in range(1, 3):
 			config.block_size = default_block * i
+			if config.block_size > default_block:
+				self.model.freqs_cis = self.model.freqs_cic_test
 			self.loss = self.calculate_loss(config.block_size)
 			test_loss = round(self.loss['test'].item(), 5)
 			train_loss = round(self.loss['train'].item(), 5)
@@ -422,6 +424,8 @@ class ManageModel:
 					f'test/perplexity_{config.block_size}': test_pp,
 					'iter': epoch,
 				})
+			self.model.freqs_cis = default_freqs
+
 		config.block_size = default_block
 		config.mode = state
 
