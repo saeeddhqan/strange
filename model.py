@@ -146,7 +146,6 @@ class Attention(nn.Module):
 
 	def forward(self,
 		x: Tensor,
-		y: None,
 		freqs_cis: Optional[Union[Tensor, None]] = None,
 	) -> Tuple[Tensor, None]:
 		B, T, C = x.size()
@@ -178,7 +177,7 @@ class Attention(nn.Module):
 		y = y.transpose(1, 2).contiguous().view(B, T, C)
 
 		y = self.resid_dropout(self.c_proj(y))
-		return y, None
+		return y
 
 
 class NonLinear(nn.Module):

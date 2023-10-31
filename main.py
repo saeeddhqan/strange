@@ -67,8 +67,8 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'normal_',
 	'topk': -1,
-	'pos': 'dynamic', # rope, dynamic, learnable
-	'attention': 2,
+	'pos': 'rope', # rope, dynamic, learnable
+	'attention': 1,
 }
 
 
@@ -401,7 +401,7 @@ class ManageModel:
 		for i in range(1, 3):
 			config.block_size = default_block * i
 			if config.block_size > default_block:
-				self.model.freqs_cis = self.model.freqs_cic_test
+				self.model.freqs_cis = self.model.freqs_cis_test
 			self.loss = self.calculate_loss(config.block_size)
 			test_loss = round(self.loss['test'].item(), 5)
 			train_loss = round(self.loss['train'].item(), 5)
