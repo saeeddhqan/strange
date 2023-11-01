@@ -70,7 +70,7 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'normal_',
 	'topk': -1,
-	'pos': 'rope', # rope, dynamic, learnable
+	'pos': 'dynamic', # rope, dynamic, learnable
 	'attention': 1,
 	'dypes': None,
 }
