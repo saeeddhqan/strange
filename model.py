@@ -249,7 +249,7 @@ class Transformer(nn.Module):
 			config.pos_mask_range, config.pos_cmax = dype.create_mask_range(
 				hsize, config.pos_win, config.pos_decay)
 			config.dypes = dype.create_embs(
-				config.mask_range, config.block_size * 2, hsize,
+				config.pos_mask_range, config.block_size * 2, hsize,
 			)
 
 		self.stack = nn.ModuleDict(dict(
