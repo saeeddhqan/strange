@@ -34,6 +34,6 @@ def create_mask_range(C, w, decay_factor):
 	return mask, Cmax
 
 
-def create_embs(mask_range, T, C):
+def create_embs(mask_range, T, Cmax):
 	dype = mask_range.expand(T, -1) + torch.arange(0, Cmax * T, Cmax).view(1, -1).T
 	return dype
