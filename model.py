@@ -1,11 +1,11 @@
 
-import torch
+import torch, math
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
 from transformers import AutoTokenizer 
 
-import math
+import dype
 
 
 config = None
@@ -122,31 +122,43 @@ class Attention(nn.Module):
 		self.pos_method = config.pos
 		self.hsize = self.dim // self.nheads
 		self.block_size = config.block_size
-		self.pos_win = config.pos_win
-		self.dim_snip = self.hsize // self.pos_win
-		self.dropout_pos = nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None
+
 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.attn_dropout = nn.Dropout(self.dropout)
 		self.resid_dropout = nn.Dropout(self.dropout)
-		self.pos_coef = nn.Parameter(torch.tensor(data=0.6)) if self.pos_method == 'dynamic' else None
+		if self.pos_method == 'dynamic':
+			self.pos_win = config.pos_win
+			self.cmax = config.pos_cmax
+			self.pad_size = self.cmax * self.pos_win
+			self.pos_dropout = nn.Dropout(config.pos_dropout)
+			self.pos_coef = nn.Parameter(torch.tensor(data=0.4))
 		self.flash = config.flash_attention
 		if not self.flash:
 			self.register_buffer('bias', torch.tril(torch.ones(self.block_size, self.block_size))
 										.view(1, 1, self.block_size, self.block_size))
 
-	def create_dype(self, x: Tensor) -> Tensor:
-		snip = x[:,:,:,:self.dim_snip].flatten(2) # (B, n)
-		snip = F.pad(snip, (self.hsize - self.dim_snip, 0), value=0) # (B, n+)
-		pos_emb = self.dropout_pos(
+	def create_dype_v1(self, x: Tensor) -> Tensor:
+		snip = x[:,:,:,:self.dim_snip].flatten(2)
+		snip = F.pad(snip, (self.hsize - self.dim_snip, 0), value=0)
+		pos_emb = self.pos_dropout(
 			snip.unfold(2, self.hsize, self.dim_snip),
-		) # (B, T, C)
+		)
 		return pos_emb
 
+	def create_dype_v2(self, x: Tensor) -> Tensor:
+		pos_emb = self.pos_dropout(
+			F.pad(
+				x[:,:,:,:self.cmax].flatten(2),
+				(self.pad_size, 0),
+				value=1.0,
+			)[:,:,config.dypes]
+		)
+		return pos_emb
 
 	def forward(self,
 		x: Tensor,
-		freqs_cis: Optional[Union[Tensor, None]] = None,
+		freqs_cis: Optional[Tensor] = None,
 	) -> Tuple[Tensor, None]:
 		B, T, C = x.size()
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
@@ -158,8 +170,8 @@ class Attention(nn.Module):
 		if self.pos_method == 'rope':
 			q, k = apply_rotary_emb(q, k, freqs_cis)
 		elif self.pos_method == 'dynamic':
-			q = q + (self.create_dype(q) * self.pos_coef)
-			k = k + (self.create_dype(k) * self.pos_coef)
+			q = q + (self.create_dype_v2(q) * self.pos_coef)
+			k = k + (self.create_dype_v2(k) * self.pos_coef)
 
 		if self.flash:
 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
@@ -225,16 +237,20 @@ class Transformer(nn.Module):
 		super().__init__()
 		self.dim = config.dim
 		self.pos_method = config.pos
-
+		self.freqs_cis = None
+		self.freqs_cis_test = None
 		if self.pos_method == 'rope':
 			self.freqs_cis = precompute_freqs_cis(self.dim // config.nheads, config.block_size)
 			self.freqs_cis_test = precompute_freqs_cis_ntk(
 				self.dim // config.nheads, config.block_size * 2, config.block_size,
 			)
-		else:
-			self.freqs_cis = None
-			self.freqs_cis_test = None
-
+		elif self.pos_method == 'dynamic':
+			hsize = self.dim // config.nheads
+			config.pos_mask_range, config.pos_cmax = dype.create_mask_range(
+				hsize, self.pos_win, config.pos_decay)
+			config.dypes = dype.create_embs(
+				config.mask_range, config.block_size * 2, hsize,
+			)
 
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
