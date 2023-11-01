@@ -247,7 +247,7 @@ class Transformer(nn.Module):
 		elif self.pos_method == 'dynamic':
 			hsize = self.dim // config.nheads
 			config.pos_mask_range, config.pos_cmax = dype.create_mask_range(
-				hsize, self.pos_win, config.pos_decay)
+				hsize, config.pos_win, config.pos_decay)
 			config.dypes = dype.create_embs(
 				config.mask_range, config.block_size * 2, hsize,
 			)
