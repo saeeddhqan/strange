@@ -152,7 +152,18 @@ class Attention(nn.Module):
 				x[:,:,:,:self.cmax].flatten(2),
 				(self.pad_size, 0),
 				value=1.0,
-			)[:,:,config.dypes]
+			)[:,:,config.dypes[:x.size(2)]]
+		)
+		# print(pos_emb.shape)
+		return pos_emb
+
+	def create_dype_v3(self, x: Tensor) -> Tensor:
+		pos_emb = self.pos_dropout(
+			F.pad(
+				x[:,:,:self.cmax].flatten(1),
+				(self.pad_size, 0),
+				value=1.0,
+			)[:,config.dypes[:x.size(1)]]
 		)
 		return pos_emb
 
@@ -163,15 +174,18 @@ class Attention(nn.Module):
 		B, T, C = x.size()
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
+		q = q + (self.create_dype_v3(q) * self.pos_coef)
+		k = k + (self.create_dype_v3(k) * self.pos_coef)
+
 		q = q.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 		k = k.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 		v = v.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 
 		if self.pos_method == 'rope':
 			q, k = apply_rotary_emb(q, k, freqs_cis)
-		elif self.pos_method == 'dynamic':
-			q = q + (self.create_dype_v2(q) * self.pos_coef)
-			k = k + (self.create_dype_v2(k) * self.pos_coef)
+		# elif self.pos_method == 'dynamic':
+		# 	q = q + (self.create_dype_v2(q) * self.pos_coef)
+		# 	k = k + (self.create_dype_v2(k) * self.pos_coef)
 
 		if self.flash:
 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
@@ -247,7 +261,7 @@ class Transformer(nn.Module):
 		elif self.pos_method == 'dynamic':
 			hsize = self.dim // config.nheads
 			config.pos_mask_range, config.pos_cmax = dype.create_mask_range(
-				hsize, config.pos_win, config.pos_decay)
+				self.dim, config.pos_win, config.pos_decay)
 			config.dypes = dype.create_embs(
 				config.pos_mask_range, config.block_size * 2, config.pos_cmax,
 			)
