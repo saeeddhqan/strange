@@ -68,3 +68,7 @@
 		# 	print('all=', accum, ',correct=', corr, ',accuracy=', corr/accum)
 		# except:
 		# 	pass
+# SoTA:
+		# if self.pos_method == 'dynamic':
+		# 	q = q + self.lnq(self.create_dype_v4(v) * self.pos_coef)
+		# 	k = k + self.lnk(self.create_dype_v4(v) * self.pos_coef)

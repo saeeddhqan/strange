@@ -26,7 +26,7 @@ def create_mask_range(C, w, decay_factor):
 	prob_dist = create_prob_dist(w, C, decay_factor).flip(0)
 	Cmax = prob_dist.max().item()
 	mask = (torch.arange(Cmax)[None, :] < prob_dist[:, None]).to(torch.int)
-	mask[mask == 0] = -(Cmax + 1) # To make sure they won't be >= 0 by addition
+	mask[mask == 0] = -(C * w + 1) # To make sure they won't be >= 0 by addition
 	mask = mask * torch.arange(0, Cmax).view(1, -1)
 	mask = mask + torch.arange(0, Cmax * mask.size(0), Cmax).view(1, -1).T
 	mask = mask.view(1, -1)
