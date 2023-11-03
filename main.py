@@ -37,13 +37,10 @@ params = {
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
-	'pos_win': 6,
-	'pos_decay': 0.2,
-	'pos_cmax': None,
-	'pos_mask_range': None,
+	'pos_win': 5,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
-	'pos_dropout': 0.00,
+	'pos_dropout': 0.0,
 	'dim': dim,
 	'weight_decay': 0.001,
 	'grad_clip': 1.0,
@@ -71,7 +68,6 @@ params = {
 	'topk': -1,
 	'pos': 'dynamic', # rope, dynamic, learnable
 	'attention': 1,
-	'dypes': None,
 	'freqs_cis_test': None,
 }
 
@@ -404,7 +400,7 @@ class ManageModel:
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
 		if config.iterations - epoch == 1:
-			steps = 8
+			steps = 5
 			logs = {'train': {}, 'test': {}}
 		else:
 			steps = 3
@@ -414,7 +410,9 @@ class ManageModel:
 			config.block_size = bsize
 
 			if bsize > default_block and config.pos == 'rope':
-				self.model.freqs_cis = config.freqs_cis_test[:bsize]
+				self.model.freqs_cis = model.precompute_freqs_cis_ntk(
+					config.dim // config.nheads, bsize, default_block,
+				)
 
 			self.loss = self.calculate_loss(bsize)
 
@@ -429,8 +427,8 @@ class ManageModel:
 			if config.tensorboard:
 				self.tensorboard_writer.add_scalar(f'train_loss_{bsize}', train_loss, epoch, new_style=True)
 				self.tensorboard_writer.add_scalar(f'test_loss_{bsize}', test_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'train_pp_{bsize}', train_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'test_pp__{bsize}', test_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'train_pp_{bsize}', train_pp, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'test_pp__{bsize}', test_pp, epoch, new_style=True)
 				self.tensorboard_writer.flush()
 
 			if config.wandb:
@@ -442,17 +440,19 @@ class ManageModel:
 					'iter': epoch,
 				})
 
-			if steps == 8:
+			if steps > 3:
 				logs['train'][bsize] = [train_loss, train_pp]
 				logs['test'][bsize] = [test_loss, test_pp]
 
 			if config.pos == 'rope':
 				self.model.freqs_cis = default_freqs
 
-		if steps == 8:
+		if steps > 3:
 			json.dump(logs, open(f'length_log_{config.pos}.json', 'w'))
 		config.block_size = default_block
 		config.mode = state
+		if config.pos == 'dynamic':
+			print([self.model.blocks[i].attn.pos_coef.item() for i in range(config.nlayers)])
 
 
 	def train_procedure(self) -> NoReturn:
@@ -607,8 +607,8 @@ if __name__ == '__main__':
 			else:
 				config.data_load = model.Data(config)
 				model.config = config
-				model = model.Transformer()
-				task.model = torch.compile(model) if config.compile else model
+				themodel = model.Transformer()
+				task.model = torch.compile(themodel) if config.compile else themodel
 			task.train()
 		case 'test':
 			config.mode = 'inference'

@@ -72,3 +72,28 @@
 		# if self.pos_method == 'dynamic':
 		# 	q = q + self.lnq(self.create_dype_v4(v) * self.pos_coef)
 		# 	k = k + self.lnk(self.create_dype_v4(v) * self.pos_coef)
+# v321:
+		# def create_dype_v1(self, x: Tensor) -> Tensor:
+		# 	snip = x[:,:,:,:self.dim_snip].flatten(2)
+		# 	snip = F.pad(snip, (self.hsize - self.dim_snip, 0), value=0)
+		# 	pos_emb = snip.unfold(2, self.hsize, self.dim_snip)
+		# 	return pos_emb
+		# def create_dype_v2(self, x: Tensor) -> Tensor:
+		# 	pos_emb = self.pos_dropout(
+		# 		F.pad(
+		# 			x[:,:,:,:self.cmax].flatten(2),
+		# 			(self.pad_size, 0),
+		# 			value=1.0,
+		# 		)[:,:,config.dypes[:x.size(2)]]
+		# 	)
+		# 	return pos_emb
+
+		# def create_dype_v3(self, x: Tensor) -> Tensor:
+		# 	pos_emb = self.pos_dropout(
+		# 		F.pad(
+		# 			x[:,:,:self.cmax].flatten(1),
+		# 			(self.pad_size, 0),
+		# 			value=1.0,
+		# 		)[:,config.dypes[:x.size(1)]]
+		# 	)
+		# 	return pos_emb
