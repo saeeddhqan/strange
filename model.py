@@ -1,5 +1,5 @@
 
-import torch, math
+import torch, math, json
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
@@ -10,25 +10,13 @@ config = None
 
 class Data:
 	def __init__(self, config: ClassVar) -> NoReturn:
-		split = 8
-		data = torch.tensor([])
-		for chunk in range(split + 1):
-			data = torch.cat((data, torch.load(f'{config.data_file}_p{chunk}.pt')))
-		data = data.to(torch.long)
+		self.s2i = json.load(open('data/decoder.json'))
+		self.i2s = {x[1]: x[0] for x in self.s2i.items()}
+		self.encode = lambda seq: [self.s2i[x] for x in seq]
+		self.decode = lambda seq: ''.join([self.i2s[x] for x in seq])
 
-		model = 'mistralai/Mistral-7B-v0.1'
-		self.tokenizer = AutoTokenizer.from_pretrained(model)
-
-		self.encode = self.tokenizer.encode
-		self.decode = lambda seq: self.tokenizer.decode(seq, skip_special_tokens=True)
-
-		self.vocab_size = self.tokenizer.vocab_size
+		self.vocab_size = len(self.s2i)
 		config.vocab_size = self.vocab_size
-
-		train_split = int(0.9 * len(data))
-
-		self.train_data = data[:train_split]
-		self.test_data = data[train_split:]
 
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
@@ -39,17 +27,18 @@ class Data:
 
 
 	def get_batch(self, 
-		idx: int, split: str = 'train',
+		idx: int, bidx: int,
+		split: str = 'train',
 		block_size: int = None,
 		batch_size: int = -1,
 	) -> tuple[Tensor, Tensor]:
 		block_size = self.block_size if block_size is None else block_size
 		batch_size = self.batch_size if batch_size == -1 else batch_size
 
-		data = self.train_data if split == 'train' else self.test_data
-		ix = torch.randint(len(data) - block_size, (batch_size,))
-		x = torch.stack([data[i:i + block_size] for i in ix])
-		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
+		data = 'train' if split == 'train' else 'test'
+		load = torch.tensor(torch.load(f"data/{data}/{idx}_{bidx}.pt"))
+		x = load[:,:-20]
+		y = load[:,-19:]
 		return (x.pin_memory().to(config.device, non_blocking=True),
 				y.pin_memory().to(config.device, non_blocking=True),
 		)
@@ -296,21 +285,20 @@ class Transformer(nn.Module):
 
 
 	def forward(self, 
-		seq: Tensor,
+		x: Tensor,
 		targets: Union[Tensor, None] = None,
 	) -> tuple[Tensor, Tensor]:
 
-		B, T = seq.shape
-		x = self.stack.tok_embs(seq)
+		B, T = x.shape
+		x = self.stack.tok_embs(x)
 
-		freqs_cis = None if self.pos_method != 'rope' else self.freqs_cis[:T].to(seq.device)
+		freqs_cis = None if self.pos_method != 'rope' else self.freqs_cis[:T].to(targets.device)
 		x = self.stack.dropout(x)
 
 		for i, block in enumerate(self.blocks):
 			x = block(x, freqs_cis=freqs_cis)
 
-		if targets is None:
-			x = x[:,-1]
+		x = x[:,-19:]
 
 		x = self.stack.ln1(x)
 		logits = self.stack.lm_head(x)
@@ -318,7 +306,7 @@ class Transformer(nn.Module):
 		if targets is None:
 			loss = None
 		else:
-			logits = logits.view(-1, config.vocab_size)
+			logits = logits.view(-1, 19)
 			loss = F.cross_entropy(logits, targets.flatten())
 
 		return logits, loss

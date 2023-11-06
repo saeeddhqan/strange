@@ -33,7 +33,7 @@ params = {
 	'eval_step': 250, # Every n step, we do an evaluation.
 	'iterations': 5000, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
-	'batch_size': 128,
+	'batch_size': 16,
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
@@ -48,7 +48,7 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/politic100k',
+	'data_file': 'data',
 	'load': '',
 	'action': 'train',
 	'mode': 'train',
@@ -296,7 +296,7 @@ class ManageModel:
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
-				project='Wizard Cloak',
+				project='Bench Long',
 				name=variation,
 				config=config.get_model_params(),
 			)
@@ -369,7 +369,7 @@ class ManageModel:
 			# A tensor to capture the losses
 			losses = torch.zeros(config.eval_iterations)
 			for k in range(config.eval_iterations):
-				X, y = config.data_load.get_batch(0, split, block_size=length)
+				X, y = config.data_load.get_batch(k, 0, split, block_size=length)
 				with config.autocast:
 					_, loss = self.model(X, y)
 				losses[k] = loss.item()
@@ -391,65 +391,31 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		default_block = config.block_size
-		default_freqs = self.model.freqs_cis
-		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
+		self.loss = self.calculate_loss(config.block_size)
+		test_loss = round(self.loss['test'].item(), 5)
+		train_loss = round(self.loss['train'].item(), 5)
+		test_pp = round(torch.exp(self.loss['test']).item(), 5)
+		train_pp = round(torch.exp(self.loss['train']).item(), 5)
 
-		print(seq)
-		print('-' * 10)
-		print(f"[{epoch}] > Elapsed: {elapsed}")
-		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
-		if config.iterations - epoch == 1:
-			steps = 5
-			logs = {'train': {}, 'test': {}}
-		else:
-			steps = 3
+		print(f"[{epoch}] > train: {train_loss}, {train_pp} PPL, test: {test_loss}, {test_pp} PPL")
+		print('-' * 30)
 
-		for i in range(1, steps):
-			bsize = default_block * i
-			config.block_size = bsize
+		if config.tensorboard:
+			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar('train_ppl', train_pp, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar('test_ppl', test_pp, epoch, new_style=True)
+			self.tensorboard_writer.flush()
 
-			if bsize > default_block and config.pos == 'rope':
-				self.model.freqs_cis = model.precompute_freqs_cis_ntk(
-					config.dim // config.nheads, bsize, default_block,
-				)
+		if config.wandb:
+			wandb.log({
+				'train/loss': train_loss,
+				'test/loss': test_loss,
+				'train/ppl': train_pp,
+				'test/ppl': test_pp,
+				'iter': epoch,
+			})
 
-			self.loss = self.calculate_loss(bsize)
-
-			test_loss = round(self.loss['test'].item(), 5)
-			train_loss = round(self.loss['train'].item(), 5)
-			test_pp = round(torch.exp(self.loss['test']).item(), 5)
-			train_pp = round(torch.exp(self.loss['train']).item(), 5)
-
-			print(f"[{epoch}][{bsize}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
-			print('-' * 30)
-
-			if config.tensorboard:
-				self.tensorboard_writer.add_scalar(f'train_loss_{bsize}', train_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'test_loss_{bsize}', test_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'train_pp_{bsize}', train_pp, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'test_pp__{bsize}', test_pp, epoch, new_style=True)
-				self.tensorboard_writer.flush()
-
-			if config.wandb:
-				wandb.log({
-					f'train/loss_{bsize}': train_loss,
-					f'test/loss_{bsize}': test_loss,
-					f'train/perplexity_{bsize}': train_pp,
-					f'test/perplexity_{bsize}': test_pp,
-					'iter': epoch,
-				})
-
-			if steps > 3:
-				logs['train'][bsize] = [train_loss, train_pp]
-				logs['test'][bsize] = [test_loss, test_pp]
-
-			if config.pos == 'rope':
-				self.model.freqs_cis = default_freqs
-
-		if steps > 3:
-			json.dump(logs, open(f'length_log_{config.pos}.json', 'w'))
-		config.block_size = default_block
 		config.mode = state
 		if config.pos == 'dynamic':
 			print([self.model.blocks[i].attn.pos_coef.item() for i in range(config.nlayers)])
@@ -466,7 +432,7 @@ class ManageModel:
 				specifies whether the training should continue or not.
 		'''
 		epoch = 0
-		X, Y = config.data_load.get_batch(epoch)
+		
 		while True:
 			lr = self.get_lr(epoch + 1) if config.decay_lr else config.lr
 
@@ -476,11 +442,11 @@ class ManageModel:
 
 			start = time.time()
 			for accum_step in range(config.accumulation_steps):
+				X, Y = config.data_load.get_batch(idx=epoch, bidx=accum_step)
 				with config.autocast:
 					pred, loss = self.model(X, Y)
 					loss = loss / config.accumulation_steps
 
-				X, Y = config.data_load.get_batch(epoch)
 				self.scaler.scale(loss).backward()
 
 
