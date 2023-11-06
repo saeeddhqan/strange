@@ -302,11 +302,10 @@ class Transformer(nn.Module):
 
 		x = self.stack.ln1(x)
 		logits = self.stack.lm_head(x)
-
 		if targets is None:
 			loss = None
 		else:
-			logits = logits.view(-1, 19)
+			logits = logits.view(-1, config.vocab_size)
 			loss = F.cross_entropy(logits, targets.flatten())
 
 		return logits, loss
