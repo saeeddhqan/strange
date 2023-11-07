@@ -132,6 +132,15 @@ class Attention(nn.Module):
 		pos_emb = snip.unfold(1, self.dim, self.dim_snip)
 		return pos_emb
 
+	def create_dype_v2(self, x: Tensor) -> Tensor:
+		snip = x[:,:,:self.dim_snip].flatten(1)
+		snip = F.pad(snip, (self.dim - self.dim_snip, 0), value=1.0)
+		pos_emb = snip.unfold(1, self.dim, self.dim_snip)
+		# Blend
+		heads = a.view(x.size(0), x.size(1), self.nheads, self.hsize)
+		comb = heads.transpose(2, 3).contiguous().view(x.size(0), x.size(1), -1)
+		return comb
+
 	def forward(self,
 		x: Tensor,
 		freqs_cis: Optional[Tensor] = None,
@@ -141,7 +150,7 @@ class Attention(nn.Module):
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
 		if self.pos_method == 'dynamic':
-			dype = self.create_dype(v) * self.pos_coef
+			dype = self.create_dype_v2(v) * self.pos_coef
 			q = q + self.lnq(dype)
 			k = k + self.lnk(dype)
 
@@ -298,7 +307,7 @@ class Transformer(nn.Module):
 		for i, block in enumerate(self.blocks):
 			x = block(x, freqs_cis=freqs_cis)
 
-		x = x[:,-19:]
+		x = x[:,-19:][:,torch.arange(0, 19, 2)]
 
 		x = self.stack.ln1(x)
 		logits = self.stack.lm_head(x)
