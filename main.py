@@ -400,10 +400,10 @@ class ManageModel:
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
 		if config.iterations - epoch == 1:
-			steps = 5
+			steps = 3
 			logs = {'train': {}, 'test': {}}
 		else:
-			steps = 3
+			steps = 2
 
 		for i in range(1, steps):
 			bsize = default_block * i
@@ -440,7 +440,7 @@ class ManageModel:
 					'iter': epoch,
 				})
 
-			if steps > 3:
+			if steps == 3:
 				logs['train'][bsize] = [train_loss, train_pp]
 				logs['test'][bsize] = [test_loss, test_pp]
 
