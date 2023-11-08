@@ -149,7 +149,7 @@ class Attention(nn.Module):
 		snip = F.pad(snip, (self.dim - self.dim_snip, 0), value=1.0)
 		pos_emb = snip.unfold(1, self.dim, self.dim_snip)
 		# Blend
-		heads = a.view(x.size(0), x.size(1), self.nheads, self.hsize)
+		heads = pos_emb.view(x.size(0), x.size(1), self.nheads, self.hsize)
 		comb = heads.transpose(2, 3).contiguous().view(x.size(0), x.size(1), -1)
 		return comb
 
