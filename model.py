@@ -166,11 +166,11 @@ class Attention(nn.Module):
 	def create_mean_dype_v2(self, x: Tensor) -> Tensor:
 		B, T, C = x.size()
 		Ch = C // 2
-		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0)
+		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=1.0)
 		x = x[:,:,:Ch].flatten(1).unfold(1, (self.pos_win * Ch), Ch)
 		x = x[:,:-1].view(B, T, self.pos_win, Ch)
 		x = x.mean(dim=2) * self.pos_coef
-		x = F.pad(x, (0, Ch, 0, 0), mode='constant', value=1.0)
+		x = F.pad(x, (0, Ch, 0, 0), mode='constant', value=0.0)
 		x = x.view(B, T, 2, Ch).transpose(3, 2).contiguous().view(B, T, C)
 		return x
 
@@ -185,7 +185,7 @@ class Attention(nn.Module):
 
 		if self.pos_method == 'dynamic':
 			# dype = self.create_dype_v2(v) * self.pos_coef
-			dype = self.create_mean_dype(v)
+			dype = self.create_mean_dype_v2(v)
 			q = q + self.lnq(dype)
 			k = k + self.lnk(dype)
 
