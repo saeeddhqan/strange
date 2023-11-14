@@ -156,11 +156,11 @@ class Attention(nn.Module):
 
 	def create_mean_dype(self, x: Tensor) -> Tensor:
 		B, T, C = x.size()
-		snip = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0)
-		unfolded = snip.flatten(1).unfold(1, (self.pos_win * C), C)
-		unfolded = unfolded[:,:-1].view(B, T, self.pos_win, C)
-		pe = unfolded.mean(dim=2) * self.pos_coef
-		return pe
+		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0)
+		x = x.flatten(1).unfold(1, (self.pos_win * C), C)
+		x = x[:,:-1].view(B, T, self.pos_win, C)
+		x = x.mean(dim=2)
+		return x * self.pos_coef
 
 
 	def create_mean_dype_v2(self, x: Tensor) -> Tensor:
@@ -169,10 +169,10 @@ class Attention(nn.Module):
 		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=1.0)
 		x = x[:,:,:Ch].flatten(1).unfold(1, (self.pos_win * Ch), Ch)
 		x = x[:,:-1].view(B, T, self.pos_win, Ch)
-		x = x.mean(dim=2) * self.pos_coef
+		x = x.mean(dim=2)
 		x = F.pad(x, (0, Ch, 0, 0), mode='constant', value=0.0)
 		x = x.view(B, T, 2, Ch).transpose(3, 2).contiguous().view(B, T, C)
-		return x
+		return x * self.pos_coef
 
 
 	def forward(self,
