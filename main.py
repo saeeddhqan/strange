@@ -37,7 +37,7 @@ params = {
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
-	'pos_win': 5,
+	'pos_win': 4,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'pos_dropout': 0.0,
@@ -279,7 +279,7 @@ class ManageModel:
 			)
 
 		posfix = config.pos if config.pos in ('learnable', 'rope') else \
-			f'{config.pos_win}w_{config.pos}_{config.pos_dropout}pdo'
+			f'{config.pos_win}w_{config.pos}'
 
 		ver = 'vanilla' if config.attention == 1 else f'group_{config.ngroups}ng'
 

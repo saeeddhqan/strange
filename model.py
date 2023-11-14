@@ -128,7 +128,7 @@ class Attention(nn.Module):
 		if self.pos_method == 'dynamic':
 			self.pos_win = config.pos_win
 			self.dim_snip = self.dim // self.pos_win
-			self.pos_coef = nn.Parameter(torch.tensor(data=0.9))
+			self.pos_coef = nn.Parameter(torch.tensor(data=0.1))
 			self.lnq = RMSNorm(self.dim)
 			self.lnk = RMSNorm(self.dim)
 		self.flash = config.flash_attention
@@ -154,6 +154,15 @@ class Attention(nn.Module):
 		return comb
 
 
+	def create_mean_dype(self, x: Tensor) -> Tensor:
+		B, T, C = x.size()
+		snip = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0)
+		unfolded = snip.flatten(1).unfold(1, (self.pos_win * C), C)
+		unfolded = unfolded[:,:-1].view(B, T, self.pos_win, C)
+		pe = unfolded.mean(dim=2) * self.pos_coef
+		return pe
+
+
 	def forward(self,
 		x: Tensor,
 		freqs_cis: Optional[Tensor] = None,
@@ -163,7 +172,8 @@ class Attention(nn.Module):
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
 		if self.pos_method == 'dynamic':
-			dype = self.create_dype_v2(v) * self.pos_coef
+			# dype = self.create_dype_v2(v) * self.pos_coef
+			dype = self.create_mean_dype(v)
 			q = q + self.lnq(dype)
 			k = k + self.lnk(dype)
 
