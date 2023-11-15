@@ -129,6 +129,7 @@ class Attention(nn.Module):
 			self.pos_win = config.pos_win
 			self.dim_snip = self.dim // self.pos_win
 			self.pos_coef = nn.Parameter(torch.tensor(data=0.1))
+			self.pos_mbs = config.main_block_size
 			self.lnq = RMSNorm(self.dim)
 			self.lnk = RMSNorm(self.dim)
 		self.flash = config.flash_attention
@@ -166,11 +167,28 @@ class Attention(nn.Module):
 	def create_mean_dype_v2(self, x: Tensor) -> Tensor:
 		B, T, C = x.size()
 		Ch = C // 2
-		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=1.0)
+		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0.0)
 		x = x[:,:,:Ch].flatten(1).unfold(1, (self.pos_win * Ch), Ch)
 		x = x[:,:-1].view(B, T, self.pos_win, Ch)
 		x = x.mean(dim=2)
 		x = F.pad(x, (0, Ch, 0, 0), mode='constant', value=0.0)
+		x = x.view(B, T, 2, Ch).transpose(3, 2).contiguous().view(B, T, C)
+		return x * self.pos_coef
+
+
+	def create_mean_dype_v3(self, x: Tensor) -> Tensor:
+		B, T, C = x.size()
+		Ch = C // 2
+		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0.0)
+		x = x[:,:,:Ch].flatten(1).unfold(1, (self.pos_win * Ch), Ch)
+		x = x[:,:-1].view(B, T, self.pos_win, Ch)
+		x = x.mean(dim=2)
+		x = F.pad(x, (0, Ch, 0, 0), mode='constant', value=0.0)
+		
+		pos_range = torch.sin((torch.arange(0, config.block_size) * (self.pos_mbs / config.block_size)) / (10000.0 ** (1 / C))).view(1, T, 1).expand(1, T, Ch)
+		pos_range = F.pad(pos_range, (Ch, 0, 0, 0), value=0.0).to(x.device)
+
+		x = x + pos_range
 		x = x.view(B, T, 2, Ch).transpose(3, 2).contiguous().view(B, T, C)
 		return x * self.pos_coef
 
@@ -185,7 +203,7 @@ class Attention(nn.Module):
 
 		if self.pos_method == 'dynamic':
 			# dype = self.create_dype_v2(v) * self.pos_coef
-			dype = self.create_mean_dype_v2(v)
+			dype = self.create_mean_dype_v3(v)
 			q = q + self.lnq(dype)
 			k = k + self.lnk(dype)
 

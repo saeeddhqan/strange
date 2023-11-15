@@ -25,6 +25,7 @@ block_size = 64
 dim = 128
 params = {
 	'block_size': block_size,
+	'main_block_size': block_size,
 	'lr': 1e-3, # Learning rate
 	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
@@ -37,7 +38,7 @@ params = {
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
-	'pos_win': 5,
+	'pos_win': 8,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'pos_dropout': 0.0,
@@ -81,7 +82,7 @@ def after_conf_init():
 	ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
 	config.autocast = nullcontext() if config.device == 'cpu' else torch.amp.autocast(device_type=config.device, dtype=ptdtype)
 	config.topk = None if config.topk <= 0 else config.topk
-
+	config.main_block_size = config.block_size
 
 class Config:
 	def __init__(self, data_dict: dict) -> NoReturn:
