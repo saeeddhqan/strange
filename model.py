@@ -128,7 +128,7 @@ class Attention(nn.Module):
 		if self.pos_method == 'dynamic':
 			self.pos_win = config.pos_win
 			self.dim_snip = self.dim // self.pos_win
-			self.pos_coef = nn.Parameter(torch.tensor(data=0.1))
+			self.pos_coef = nn.Parameter(torch.tensor(data=0.5))
 			self.pos_mbs = config.main_block_size
 			self.lnq = RMSNorm(self.dim)
 			self.lnk = RMSNorm(self.dim)
@@ -203,7 +203,7 @@ class Attention(nn.Module):
 
 		if self.pos_method == 'dynamic':
 			# dype = self.create_dype_v2(v) * self.pos_coef
-			dype = self.create_mean_dype_v3(v)
+			dype = self.create_mean_dype(v)
 			q = q + self.lnq(dype)
 			k = k + self.lnk(dype)
 

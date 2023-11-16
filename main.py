@@ -38,7 +38,7 @@ params = {
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
-	'pos_win': 8,
+	'pos_win': 7,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'pos_dropout': 0.0,
