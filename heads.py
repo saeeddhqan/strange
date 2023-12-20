@@ -239,12 +239,12 @@ class CausalSelfAttention3(nn.Module):
 		x = self.do_att(q, k, v)
 		if self.its_time and n_groups > 0:
 			# One communication between synthetic tokens to share information between groups
-			# v = self.do_att(
-			# 	q[:,:,:,-1],
-			# 	k[:,:,:,-1],
-			# 	x[:,:,:,-1],
-			# 	group=True,
-			# ).unsqueeze(3)
+			v = self.do_att(
+				q[:,:,:,-1],
+				k[:,:,:,-1],
+				x[:,:,:,-1],
+				group=True,
+			).unsqueeze(3)
 			v = torch.nn.functional.scaled_dot_product_attention(q[:,:,1:,0], k[:,:,:-1,-1], v[:,:,:-1,-1], 
 				attn_mask=None,
 				dropout_p=config.dropout if (self.training and not group) else 0,
@@ -338,3 +338,95 @@ start = torch.rand(3, 5, dim).cuda()
 # 	a(complete)
 # t1 = time.time()
 # print(t1-t0)
+
+
+# ###########################################################
+# Look, but don't touch
+
+
+class CausalSelfAttention2(nn.Module):
+	def __init__(self, idx: int) -> NoReturn:
+		super().__init__()
+		assert config.dim % config.nheads == 0, 'embeds size is not divisible to the nheads'
+		self.idx = idx
+		self.dim = config.dim
+		self.nheads = config.nheads
+		self.pos_method = config.pos
+		self.hsize = self.dim // self.nheads
+
+		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
+		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
+
+		self.dropout = config.dropout
+		self.resid_dropout = nn.Dropout(self.dropout)
+		self.block_drop = nn.Dropout(self.dropout)
+
+		self.n_groups = config.ngroups
+		self.group_t = (config.block_size // self.n_groups) # tokens per group
+		self.its_time = config.nlayers % 2 ^ ((self.idx + 1) % 2)
+
+	def do_att(self, q: Tensor, k: Tensor, v: Tensor, group: bool = False) -> Tensor:
+		return F.scaled_dot_product_attention(q, k, v, 
+			attn_mask=None,
+			dropout_p=config.dropout if (self.training and not group) else 0,
+			is_causal=True,
+		)
+
+	def do_block_merge(self, xblock: Tensor, x: Tensor) -> Tensor:
+		other_blocks = torch.cat((xblock, x[:,:,1:,:]), dim=3)
+		first_block = torch.cat((x[:,:,:1], xblock[:,:,:1,-1:]), dim=3)
+		x = torch.cat((first_block, other_blocks), dim=2)
+		return x
+
+	def forward(self,
+		x: Tensor,
+		y: Union[Tensor, None] = None,
+		freqs_cis: Union[Tensor, None] = None,
+	) -> Tuple[Tensor, Union[Tensor, None]]:
+		B, T, C = x.size()
+		n_groups = min(T // self.group_t, self.n_groups)
+		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
+		
+		if self.pos_method == 'rope':
+			q = q.view(B, T, self.n_head, self.hsize)
+			k = k.view(B, T, self.n_head, self.hsize)
+			q, k = apply_rotary_emb(q, k, freqs_cis)
+			q = q.view(B, T, C)
+			k = k.view(B, T, C)
+		# Change shape (B, T, C) to (B, nh, ng, gt, C)
+		q = q.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
+		k = k.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
+		v = v.view(B, n_groups, self.group_t, self.nheads, self.hsize).permute(0, 3, 1, 2, 4)
+		if self.its_time and n_groups > 0:
+			# Create and add synthetic tokens
+			q = torch.cat((q, q.mean(dim=3).unsqueeze(3)), dim=3)
+			k = torch.cat((k, k.mean(dim=3).unsqueeze(3)), dim=3)
+			v = torch.cat((v, v.mean(dim=3).unsqueeze(3)), dim=3)
+		elif y is not None and n_groups > 0:
+			# Embed synthetic tokens at the beginning of blocks so that tokens can communicate with it
+			q = self.do_block_merge(y[0], q)
+			k = self.do_block_merge(y[1], k)
+			v = self.do_block_merge(y[2], v)
+
+		x = self.do_att(q, k, v)
+		if self.its_time and n_groups > 0:
+			# remove last block from q, k, v
+			q, k = q[:,:,:-1,-1], k[:,:,:-1,-1]
+			# One communication between synthetic tokens to share information between groups
+			v = self.do_att(
+				q,
+				k,
+				x[:,:,:-1,-1],
+				group=True,
+			).unsqueeze(3)
+			y = (q.unsqueeze(3), k.unsqueeze(3), v)
+			y = self.block_drop(y[0]), self.block_drop(y[1]), self.block_drop(y[2])
+			x = x[:,:,:,:-1] # crop footprints(blocks)
+		else:
+			# If true, then remove synthetic tokens to clean the sequence.
+			if x.size(3) > self.group_t and n_groups > 0:
+				x = torch.cat((x[:,:,:1,:-1], x[:,:,1:,1:]), dim=2)
+			y = None
+		x = x.contiguous().view(B, self.nheads, x.size(2) * x.size(3), self.hsize).transpose(2, 1).contiguous().view(B, T, C)
+		x = self.resid_dropout(self.c_proj(x))
+		return x, y

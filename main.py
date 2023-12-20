@@ -21,26 +21,27 @@ def set_seed(seed: int):
 	torch.cuda.manual_seed_all(seed)
 
 
-
 set_seed(1244)
+
 block_size = 64
 dim = 128
 params = {
 	'block_size': block_size,
+	'stable_block_size': block_size,
 	'lr': 1e-3, # Learning rate
 	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
 	'beta2': 0.999, # The less, the more stable
 	'decay_lr': False,
 	'eval_step': 250, # Every n step, we do an evaluation.
-	'iterations': 5000, # Like epochs
+	'iterations': 2500, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
 	'batch_size': 64,
 	'nlayers': 2,
 	'nheads': 4,
 	'ngroups': 8,
-	'pos_win': 8,
-	'accumulation_steps': 1,
+	'pos_win': 7,
+	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'dropout_pos': 0.05,
 	'dim': dim,
@@ -50,7 +51,7 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/shakespeare.txt',
+	'data_file': 'data/politic4k.txt',
 	'load': '',
 	'action': 'train',
 	'mode': 'train',
@@ -66,10 +67,10 @@ params = {
 	'flash_attention': True,
 	'bias': False,
 	'deepnorm': False,
-	'init_weight': 'xavier',
+	'init_weight': 'normal_',
 	'topk': -1,
-	'pos': 'dynamic', # rope, dynamic, learnable
-	'attention': 2,
+	'pos': 'rope', # rope, dynamic, learnable
+	'attention': 3,
 }
 
 
@@ -82,7 +83,7 @@ def after_conf_init():
 	ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
 	config.autocast = nullcontext() if config.device == 'cpu' else torch.amp.autocast(device_type=config.device, dtype=ptdtype)
 	config.topk = None if config.topk <= 0 else config.topk
-
+	config.stable_block_size = config.block_size
 
 class Config:
 	def __init__(self, data_dict: dict) -> NoReturn:
@@ -162,10 +163,10 @@ class Config:
 				'wandb', 'tensorboard', 'details', 'data_file',
 				'variation', 'device', 'mode', 'autocast',
 				'flash_attention', 'compile',
-				'init_weight',
+				'init_weight', 'freqs_cis_test',
 			)
 		else:
-			filters = ('data_load', 'load', 'iterations', 'autocast')
+			filters = ('data_load', 'load', 'iterations', 'autocast', 'freqs_cis_test')
 		params = {}
 		for k in self.__data_dict__:
 			if k not in filters:
@@ -273,14 +274,14 @@ class ManageModel:
 			self.optimizer = torch.optim.AdamW(
 				self.model.parameters(),
 				lr=config.lr,
-				# amsgrad=True, # Found amsgrad better.
+				# amsgrad=True,
 				betas=(config.beta1, config.beta2),
 				weight_decay=config.weight_decay,
 				fused=use_fused,
 			)
 
 		posfix = config.pos if config.pos in ('learnable', 'rope') else \
-			f'{config.pos_win}w_{config.pos}_{config.dropout_pos}pdo'
+			f'{config.pos_win}w_{config.pos}'
 
 		ver = 'vanilla' if config.attention == 1 else f'group_{config.ngroups}ng'
 
@@ -390,37 +391,66 @@ class ManageModel:
 			epoch: int
 				current epoch
 		'''
+
 		state = config.mode
 		config.mode = 'inference'
+		default_block = config.block_size
+		default_freqs = self.model.freqs_cis
 		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
 		print(seq)
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
+		if config.iterations - epoch == 1:
+			steps = 3
+			logs = {'train': {}, 'test': {}}
+		else:
+			steps = 2
 
-		self.loss = self.calculate_loss(config.block_size)
-		test_loss = round(self.loss['test'].item(), 5)
-		train_loss = round(self.loss['train'].item(), 5)
-		test_pp = round(torch.exp(self.loss['test']).item(), 5)
-		train_pp = round(torch.exp(self.loss['train']).item(), 5)
+		for i in range(1, steps):
+			bsize = default_block * i
+			config.block_size = bsize
 
-		print(f"[{epoch}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
-		print('-' * 30)
-		if config.tensorboard:
-			self.tensorboard_writer.add_scalar('train_loss', train_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('test_loss', test_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('train_pp', train_loss, epoch, new_style=True)
-			self.tensorboard_writer.add_scalar('test_pp', test_loss, epoch, new_style=True)
-			self.tensorboard_writer.flush()
-		if config.wandb:
-			wandb.log({
-				'train/loss': train_loss,
-				'test/loss': test_loss,
-				'train/perplexity': train_pp,
-				'test/perplexity': test_pp,
-				'iter': epoch,
-			})
+			if bsize > default_block:
+				config.ngroups *= 2
+				for nl in range(config.nlayers):
+					self.model.blocks[nl].attn.n_groups = config.ngroups
+				if config.pos == 'rope':
+					self.model.freqs_cis = model.precompute_freqs_cis_ntk(
+						config.dim // config.nheads, bsize, default_block,
+					)
+
+			self.loss = self.calculate_loss(config.block_size)
+			test_loss = round(self.loss['test'].item(), 5)
+			train_loss = round(self.loss['train'].item(), 5)
+			test_pp = round(torch.exp(self.loss['test']).item(), 5)
+			train_pp = round(torch.exp(self.loss['train']).item(), 5)
+
+			print(f"[{epoch}] > [{bsize}] train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
+			print('-' * 30)
+			if config.tensorboard:
+				self.tensorboard_writer.add_scalar(f'train_loss_{bsize}', train_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'test_loss_{bsize}', test_loss, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'train_pp_{bsize}', train_pp, epoch, new_style=True)
+				self.tensorboard_writer.add_scalar(f'test_pp_{bsize}', test_pp, epoch, new_style=True)
+				self.tensorboard_writer.flush()
+
+			if config.wandb:
+				wandb.log({
+					f'train/loss_{bsize}': train_loss,
+					f'test/loss_{bsize}': test_loss,
+					f'train/perplexity_{bsize}': train_pp,
+					f'test/perplexity_{bsize}': test_pp,
+					'iter': epoch,
+				})
+			if config.pos == 'rope':
+				self.model.freqs_cis = default_freqs
+
+		config.block_size = default_block
 		config.mode = state
+		if config.pos == 'dynamic':
+			print([self.model.blocks[i].attn.pos_coef.item() for i in range(config.nlayers)])
+
 
 
 	def train_procedure(self) -> NoReturn:
@@ -470,14 +500,14 @@ class ManageModel:
 				self.test(epoch)
 				if config.save_checkpoint or self.loss['test'] < self.best_loss:
 					self.best_loss = self.loss['test']
-					torch.save({
-						'model': self.model.state_dict(),
-						'optimizer': self.optimizer.state_dict(),
-						'config': config.get_model_params(),
-						'train_loss': self.loss['train'],
-						'test_loss': self.loss['test'],
-						'epoch': epoch,
-						}, self.path_format + f"_{epoch}.pt")
+					# torch.save({
+					# 	'model': self.model.state_dict(),
+					# 	'optimizer': self.optimizer.state_dict(),
+					# 	'config': config.get_model_params(),
+					# 	'train_loss': self.loss['train'],
+					# 	'test_loss': self.loss['test'],
+					# 	'epoch': epoch,
+					# 	}, self.path_format + f"_{epoch}.pt")
 
 			epoch += 1
 
@@ -573,8 +603,8 @@ if __name__ == '__main__':
 			else:
 				config.data_load = model.Data(config)
 				model.config = config
-				model = model.Transformer()
-				task.model = torch.compile(model) if config.compile else model
+				the_model = model.Transformer()
+				task.model = torch.compile(the_model) if config.compile else the_model
 			task.train()
 		case 'test':
 			config.mode = 'inference'
