@@ -39,7 +39,7 @@ params = {
 	'batch_size': 64,
 	'nlayers': 2,
 	'nheads': 4,
-	'ngroups': 8,
+	'ngroups': 128,
 	'pos_win': 7,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
