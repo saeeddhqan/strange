@@ -203,7 +203,7 @@ class CausalSelfAttention2(nn.Module):
 		self.nheads = config.nheads
 		self.pos_method = config.pos
 		self.hsize = self.dim // self.nheads
-		self.k_apx = 2
+		self.k_apx = 1
 		self.c_attn = nn.Linear(self.dim, 3 * self.dim, bias=config.bias)
 		self.c_proj = nn.Linear(self.dim, self.dim, bias=config.bias)
 		self.dropout = config.dropout
@@ -394,7 +394,8 @@ class CausalSelfAttention3(nn.Module):
 			x = torch.cat(
 				(
 					x,
-					(q[:,:,:,i:i+1] * k[:,:,:,:i+1]).sum(dim=-1).unsqueeze(-1).mT @ v[:,:,:,:i + 1]
+					# (q[:,:,:,i:i+1] * k[:,:,:,:i+1]).sum(dim=-1).unsqueeze(-1).mT @ v[:,:,:,:i + 1]
+					torch.einsum('abcfe,abcde->abcf', k[:,:,:,:i+1], q[:,:,:,i:i+1]).unsqueeze(-1).mT @ v[:,:,:,:i + 1]
 				),
 				dim=3,
 			)
