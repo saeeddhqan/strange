@@ -35,7 +35,7 @@ params = {
 	'decay_lr': False,
 	'eval_step': 250, # Every n step, we do an evaluation.
 	'iterations': 2500, # Like epochs
-	'eval_iterations': 200, # Do n step(s), and calculate loss.
+	'eval_iterations': 250, # Do n step(s), and calculate loss.
 	'batch_size': 64,
 	'nlayers': 2,
 	'nheads': 4,
