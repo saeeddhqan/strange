@@ -5,3 +5,4 @@ tensorboard
 wrapt
 datasets
 transformers
+sentencepiece

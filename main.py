@@ -32,7 +32,7 @@ params = {
 	'beta2': 0.999, # The less, the more stable
 	'decay_lr': False,
 	'eval_step': 250, # Every n step, we do an evaluation.
-	'iterations': 5000, # Like epochs
+	'iterations': 2500, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
 	'batch_size': 128,
 	'nlayers': 2,
@@ -49,7 +49,7 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/politic100k',
+	'data_file': 'data/wikisplit',
 	'load': '',
 	'action': 'train',
 	'mode': 'train',
@@ -402,7 +402,6 @@ class ManageModel:
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
 		if config.iterations - epoch == 1:
 			steps = 3
-			logs = {'train': {}, 'test': {}}
 		else:
 			steps = 2
 
@@ -441,19 +440,11 @@ class ManageModel:
 					'iter': epoch,
 				})
 
-			if steps == 3:
-				logs['train'][bsize] = [train_loss, train_pp]
-				logs['test'][bsize] = [test_loss, test_pp]
-
 			if config.pos == 'rope':
 				self.model.freqs_cis = default_freqs
 
-		if steps > 3:
-			json.dump(logs, open(f'length_log_{config.pos}.json', 'w'))
 		config.block_size = default_block
 		config.mode = state
-		if config.pos == 'dynamic':
-			print([self.model.blocks[i].attn.pos_coef.item() for i in range(config.nlayers)])
 
 
 	def train_procedure(self) -> NoReturn:

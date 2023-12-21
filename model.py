@@ -1,35 +1,37 @@
 
-import torch, math
+import torch, math, sentencepiece, json
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
-from transformers import AutoTokenizer 
 
+
+def init_(tensor):
+	dim = tensor.shape[-1]
+	std = 1 / math.sqrt(dim)
+	tensor.uniform_(-std, std)
+	return tensor
 
 config = None
 
 class Data:
 	def __init__(self, config: ClassVar) -> NoReturn:
-		split = 8
 		data = torch.tensor([])
-		for chunk in range(split + 1):
-			data = torch.cat((data, torch.load(f'{config.data_file}_p{chunk}.pt')))
+		parts = 256 + 1
+		for part in range(parts):
+			with open(f'data/wikisplit/train_p{part}.json') as fp:
+				load = torch.tensor(json.load(fp))
+				data = torch.cat((data, load), dim=0)
 		data = data.to(torch.long)
-
-		model = 'mistralai/Mistral-7B-v0.1'
-		self.tokenizer = AutoTokenizer.from_pretrained(model)
-
+		self.tokenizer = sentencepiece.SentencePieceProcessor(
+			model_file='data/wikisplit/wikisplit-sp.model')
 		self.encode = self.tokenizer.encode
-		self.decode = lambda seq: self.tokenizer.decode(seq, skip_special_tokens=True)
-
-		self.vocab_size = self.tokenizer.vocab_size
+		self.decode = lambda seq: self.tokenizer.decode(seq)
+		self.vocab_size = self.tokenizer.vocab_size()
 		config.vocab_size = self.vocab_size
 
 		train_split = int(0.9 * len(data))
-
 		self.train_data = data[:train_split]
 		self.test_data = data[train_split:]
-
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
 
@@ -40,7 +42,7 @@ class Data:
 
 	def get_batch(self, 
 		idx: int, split: str = 'train',
-		block_size: int = None,
+		block_size = None,
 		batch_size: int = -1,
 	) -> tuple[Tensor, Tensor]:
 		block_size = self.block_size if block_size is None else block_size
@@ -128,10 +130,15 @@ class Attention(nn.Module):
 		if self.pos_method == 'dynamic':
 			self.pos_win = config.pos_win
 			self.dim_snip = self.dim // self.pos_win
-			self.pos_coef = nn.Parameter(torch.tensor(data=0.5))
+			# self.pos_coef = nn.Parameter(torch.tensor(data=0.5))
 			self.pos_mbs = config.main_block_size
 			self.lnq = RMSNorm(self.dim)
 			self.lnk = RMSNorm(self.dim)
+			self.q_proj = nn.Parameter(init_(torch.zeros(self.pos_win, 1)))
+			self.k_proj = nn.Parameter(init_(torch.zeros(self.pos_win, 1)))
+			# self.v_proj = nn.Parameter(init_(torch.zeros(self.pos_win, 1)))
+			# self.proj_pos = lambda args: torch.einsum('btdc,fg->btc', *args)
+
 		self.flash = config.flash_attention
 		if not self.flash:
 			self.register_buffer('bias', torch.tril(torch.ones(self.block_size, self.block_size))
@@ -154,6 +161,14 @@ class Attention(nn.Module):
 		comb = heads.transpose(2, 3).contiguous().view(x.size(0), x.size(1), -1)
 		return comb
 
+	def create_dype_v3(self, x: Tensor) -> Tensor:
+		B, T, C = x.size()
+		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0)
+		x = x.flatten(1).unfold(1, (self.pos_win * C), C)
+		x = x[:,:-1].view(B, T, self.pos_win, C)
+		xq = torch.einsum('btdc,fg->btc', x, self.q_proj)
+		xk = torch.einsum('btdc,fg->btc', x, self.k_proj)
+		return self.lnq(xq), self.lnk(xk)
 
 	def create_mean_dype(self, x: Tensor) -> Tensor:
 		B, T, C = x.size()
@@ -202,10 +217,7 @@ class Attention(nn.Module):
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
 		if self.pos_method == 'dynamic':
-			# dype = self.create_dype_v2(v) * self.pos_coef
-			dype = self.create_mean_dype(v)
-			q = q + self.lnq(dype)
-			k = k + self.lnk(dype)
+			q, k = self.create_dype_v3(v)
 
 		q = q.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 		k = k.view(B, T, self.nheads, self.hsize).transpose(1, 2)
