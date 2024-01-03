@@ -25,7 +25,6 @@ block_size = 64
 dim = 128
 params = {
 	'block_size': block_size,
-	'main_block_size': block_size,
 	'lr': 1e-3, # Learning rate
 	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
@@ -34,14 +33,11 @@ params = {
 	'eval_step': 250, # Every n step, we do an evaluation.
 	'iterations': 2500, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
-	'batch_size': 128,
+	'batch_size': 64,
 	'nlayers': 2,
 	'nheads': 4,
-	'ngroups': 8,
-	'pos_win': 7,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
-	'pos_dropout': 0.0,
 	'dim': dim,
 	'weight_decay': 0.001,
 	'grad_clip': 1.0,
@@ -49,7 +45,7 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/wikisplit',
+	'data_file': 'data/shakespeare',
 	'load': '',
 	'action': 'train',
 	'mode': 'train',
@@ -62,14 +58,9 @@ params = {
 	'compile': False,
 	'dtype': 'float16',
 	'autocast': None,
-	'flash_attention': True,
 	'bias': False,
-	'deepnorm': False,
 	'init_weight': 'normal_',
 	'topk': -1,
-	'pos': 'dynamic', # rope, dynamic, learnable
-	'attention': 1,
-	'freqs_cis_test': None,
 }
 
 
@@ -82,7 +73,7 @@ def after_conf_init():
 	ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
 	config.autocast = nullcontext() if config.device == 'cpu' else torch.amp.autocast(device_type=config.device, dtype=ptdtype)
 	config.topk = None if config.topk <= 0 else config.topk
-	config.main_block_size = config.block_size
+
 
 class Config:
 	def __init__(self, data_dict: dict) -> NoReturn:
@@ -279,16 +270,12 @@ class ManageModel:
 				fused=use_fused,
 			)
 
-		posfix = config.pos if config.pos in ('learnable', 'rope') else \
-			f'{config.pos_win}w_{config.pos}'
+		ver = 'Fnet'
 
-		ver = 'vanilla' if config.attention == 1 else f'group_{config.ngroups}ng'
-
-		variation = f"{config.variation}_{ver}_{config.nlayers}nl_\
+		variation = f"{ver}_{config.nlayers}nl_\
 		{config.nheads}nh_{config.dim}d_{config.dropout}\
-		do_{config.block_size}bs_{int(config.deepnorm)}\
-		dn_{config.lr}lr_{int(config.decay_lr)}\
-		dlr_{posfix}".strip().replace('\t', '').replace(' ', '')
+		do_{config.block_size}bs_{config.lr}lr_{int(config.decay_lr)}\
+		dlr".strip().replace('\t', '').replace(' ', '')
 
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
@@ -297,7 +284,7 @@ class ManageModel:
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
-				project='Wizard Cloak',
+				project='Fnet',
 				name=variation,
 				config=config.get_model_params(),
 			)
@@ -392,58 +379,37 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		default_block = config.block_size
-		default_freqs = self.model.freqs_cis
 		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
 
 		print(seq)
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
-		if config.iterations - epoch == 1:
-			steps = 3
-		else:
-			steps = 2
 
-		for i in range(1, steps):
-			bsize = default_block * i
-			config.block_size = bsize
+		self.loss = self.calculate_loss(config.block_size)
+		test_loss = round(self.loss['test'].item(), 5)
+		train_loss = round(self.loss['train'].item(), 5)
+		test_pp = round(torch.exp(self.loss['test']).item(), 5)
+		train_pp = round(torch.exp(self.loss['train']).item(), 5)
+		print(f"[{epoch}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
+		print('-' * 30)
 
-			if bsize > default_block and config.pos == 'rope':
-				self.model.freqs_cis = model.precompute_freqs_cis_ntk(
-					config.dim // config.nheads, bsize, default_block,
-				)
+		if config.tensorboard:
+			self.tensorboard_writer.add_scalar(f'train_loss', train_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar(f'test_loss', test_loss, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar(f'train_pp', train_pp, epoch, new_style=True)
+			self.tensorboard_writer.add_scalar(f'test_pp', test_pp, epoch, new_style=True)
+			self.tensorboard_writer.flush()
 
-			self.loss = self.calculate_loss(bsize)
+		if config.wandb:
+			wandb.log({
+				f'train/loss': train_loss,
+				f'test/loss': test_loss,
+				f'train/perplexity': train_pp,
+				f'test/perplexity': test_pp,
+				'iter': epoch,
+			})
 
-			test_loss = round(self.loss['test'].item(), 5)
-			train_loss = round(self.loss['train'].item(), 5)
-			test_pp = round(torch.exp(self.loss['test']).item(), 5)
-			train_pp = round(torch.exp(self.loss['train']).item(), 5)
-
-			print(f"[{epoch}][{bsize}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
-			print('-' * 30)
-
-			if config.tensorboard:
-				self.tensorboard_writer.add_scalar(f'train_loss_{bsize}', train_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'test_loss_{bsize}', test_loss, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'train_pp_{bsize}', train_pp, epoch, new_style=True)
-				self.tensorboard_writer.add_scalar(f'test_pp__{bsize}', test_pp, epoch, new_style=True)
-				self.tensorboard_writer.flush()
-
-			if config.wandb:
-				wandb.log({
-					f'train/loss_{bsize}': train_loss,
-					f'test/loss_{bsize}': test_loss,
-					f'train/perplexity_{bsize}': train_pp,
-					f'test/perplexity_{bsize}': test_pp,
-					'iter': epoch,
-				})
-
-			if config.pos == 'rope':
-				self.model.freqs_cis = default_freqs
-
-		config.block_size = default_block
 		config.mode = state
 
 
@@ -568,7 +534,6 @@ if __name__ == '__main__':
 	parser.add_argument('--load', type=str, default=config.load, help='path to a model to start with')
 	parser.add_argument('--data-file', type=str, default=config.data_file, help=f"input data file, default {config.data_file}")
 	parser.add_argument('--variation', '-v', type=str, default=config.variation, help=f"model variation, default {config.variation}")
-	parser.add_argument('--pos', '-p', type=str, default=config.pos, help=f"position encoding method (dynamic, rope), default {config.pos}")
 	parser.add_argument('--details', type=str, help=f"model details, default {config.details}")
 	parser.add_argument('--iterations', '-i', type=int, default=config.iterations, help=f"number of training iterations, default {config.iterations}")
 	parser.add_argument('--lr', '-lr', type=float, default=config.lr, help=f"learning rate, default {config.lr}")
@@ -585,7 +550,6 @@ if __name__ == '__main__':
 	parser.add_argument('--tensorboard', action='store_true', default=config.tensorboard, help=f"use tensorboard for visualization, default {config.tensorboard}")
 	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"compile the model for faster training, default {config.compile}")
 	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"decay learning rate, default {config.decay_lr}")
-	parser.add_argument('--deepnorm', action='store_true', default=config.deepnorm, help=f"use deep layer normalizer, default {config.deepnorm}")
 	args = parser.parse_args()
 
 	config.set_args(args)
