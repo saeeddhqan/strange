@@ -161,14 +161,14 @@ class Attention(nn.Module):
 		comb = heads.transpose(2, 3).contiguous().view(x.size(0), x.size(1), -1)
 		return comb
 
-	def create_dype_v3(self, x: Tensor) -> Tensor:
+	def create_dype_v3(self, x: Tensor, q: Tensor, k: Tensor) -> Tensor:
 		B, T, C = x.size()
 		x = F.pad(x, (0, 0, self.pos_win, 0), mode='constant', value=0)
 		x = x.flatten(1).unfold(1, (self.pos_win * C), C)
 		x = x[:,:-1].view(B, T, self.pos_win, C)
 		xq = torch.einsum('btdc,fg->btc', x, self.q_proj)
 		xk = torch.einsum('btdc,fg->btc', x, self.k_proj)
-		return self.lnq(xq), self.lnk(xk)
+		return q + self.lnq(xq), k + self.lnk(xk)
 
 	def create_mean_dype(self, x: Tensor) -> Tensor:
 		B, T, C = x.size()
@@ -217,7 +217,7 @@ class Attention(nn.Module):
 		q, k, v  = self.c_attn(x).split(self.dim, dim=2)
 
 		if self.pos_method == 'dynamic':
-			q, k = self.create_dype_v3(v)
+			q, k = self.create_dype_v3(v, q, k)
 
 		q = q.view(B, T, self.nheads, self.hsize).transpose(1, 2)
 		k = k.view(B, T, self.nheads, self.hsize).transpose(1, 2)
