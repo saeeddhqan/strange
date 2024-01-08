@@ -8,7 +8,7 @@ wandb
 runs
 data.py
 workdir
-
+fused_loop
 # C extensions
 *.so
 
