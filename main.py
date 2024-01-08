@@ -31,7 +31,7 @@ params = {
 	'beta2': 0.999, # The less, the more stable
 	'decay_lr': False,
 	'eval_step': 250, # Every n step, we do an evaluation.
-	'iterations': 2500, # Like epochs
+	'iterations': 251, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
 	'batch_size': 64,
 	'nlayers': 2,
@@ -45,7 +45,7 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/shakespeare',
+	'data_file': 'data/shakespeare.txt',
 	'load': '',
 	'action': 'train',
 	'mode': 'train',
@@ -61,6 +61,9 @@ params = {
 	'bias': False,
 	'init_weight': 'normal_',
 	'topk': -1,
+	'token_type': 'char',
+	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
+	'layers_health': [],
 }
 
 
@@ -134,8 +137,11 @@ class Config:
 				parsed args object
 		'''
 		for kv in args._get_kwargs():
-			k,v = kv
+			k, v = kv
+			if k in dir(model.conf_mamba):
+				model.conf_mamba.k = v
 			self.__setattr__(k, v)
+
 		after_conf_init()
 
 
@@ -233,20 +239,60 @@ class ManageModel:
 		self.model.load_state_dict(checkpoint['model'])
 
 
-	def net_health(self, epoch: int, lr: float) -> NoReturn:
+	def net_health(self, epoch: int, lr: float, test_time: bool) -> NoReturn:
 		'''
-			Gradients. Needs to be run after each iter.
+			Logging more information about the vectors, weights, 
+			and one day gradients. Needs to be run after each iter.
 			Parameters
 			----------
 			epoch: int
 				current epoch
 			lr: float
 				current learning rate
+			test_time: bool
+				true if it's the test time, false otherwise
 		'''
-		if config.tensorboard:
+		for i, layer in enumerate(config.layers_health):
+			for k, v in layer.items():
+				if config.tensorboard:
+					self.tensorboard_writer.add_scalar(f"layers.{i}.{k}", v, epoch, new_style=True)
+				if config.wandb:
+					wandb.log({
+						f"layers.{i}.{k}": v,
+					})
+
+
+		if config.tensorboard and config.decay_lr:
+			self.tensorboard_writer.add_scalar('lr', lr, epoch, new_style=True)
+		if config.wandb:
+			wandb.log({
+				'lr': lr,
+			})
+		if test_time:
 			for name, param in self.model.named_parameters():
-				if param.grad is not None:
-					self.tensorboard_writer.add_histogram(name + '/grad', param.grad, global_step=epoch)
+				grad_norm = None if param.grad is None else param.grad.data.norm(2).item()
+				weight_norm = None if 'weight' not in name else param.norm(2).item()
+				if config.tensorboard:
+					if grad_norm is not None:
+						self.tensorboard_writer.add_scalar(f"{name}.gradient.norm", grad_norm, epoch, new_style=True)
+					if weight_norm is not None:
+						self.tensorboard_writer.add_scalar(f"{name}.weight.norm", weight_norm, epoch, new_style=True)
+
+				if config.wandb:
+					if grad_norm is not None:
+						wandb.log({
+							f"{name}.gradient.norm": grad_norm,
+						})
+					if weight_norm is not None:
+						wandb.log({
+							f"{name}.gradient.norm": weight_norm,
+						})
+
+
+
+		config.layers_health = []
+
+		if config.tensorboard:
 			self.tensorboard_writer.flush()
 
 
@@ -270,7 +316,7 @@ class ManageModel:
 				fused=use_fused,
 			)
 
-		ver = 'Fnet'
+		ver = 'mamba'
 
 		variation = f"{ver}_{config.nlayers}nl_\
 		{config.nheads}nh_{config.dim}d_{config.dropout}\
@@ -284,7 +330,7 @@ class ManageModel:
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
-				project='Fnet',
+				project='mamba',
 				name=variation,
 				config=config.get_model_params(),
 			)
@@ -426,12 +472,13 @@ class ManageModel:
 		epoch = 0
 		X, Y = config.data_load.get_batch(epoch)
 		while True:
+			test_time = epoch % config.eval_step == config.eval_step - 1
 			lr = self.get_lr(epoch + 1) if config.decay_lr else config.lr
 
 			for param_group in self.optimizer.param_groups:
 				param_group['lr'] = lr
 
-
+			config.layers_health = [{} for _ in range(config.nlayers)]
 			start = time.time()
 			for accum_step in range(config.accumulation_steps):
 				with config.autocast:
@@ -450,13 +497,14 @@ class ManageModel:
 
 			self.scaler.step(self.optimizer)
 			self.scaler.update()
+			self.net_health(epoch, lr, test_time)
 			self.optimizer.zero_grad(set_to_none=True)
 
 			stop = time.time()
 			self.elapsed_time += stop - start
 
 			# If it's the right time to test the model
-			if epoch % config.eval_step == config.eval_step - 1:
+			if test_time:
 				self.test(epoch)
 				if config.save_checkpoint or self.loss['test'] < self.best_loss:
 					self.best_loss = self.loss['test']
@@ -468,11 +516,11 @@ class ManageModel:
 					# 	'test_loss': self.loss['test'],
 					# 	'epoch': epoch,
 					# 	}, self.path_format + f"_{epoch}.pt")
-
 			epoch += 1
 
 			if epoch > config.iterations:
 				break
+
 
 
 	def train(self) -> NoReturn:

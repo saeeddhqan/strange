@@ -6,9 +6,9 @@ def train_sentencepiece(file: str = 'shakespeare.txt') -> None:
 	    input=file,
 	    model_prefix='shakespeare-sp', 
 	    model_type='bpe', 
-	    vocab_size=254,
+	    vocab_size=128,
 	    character_coverage=1.0,
-	    user_defined_symbols=['\n'],
+	   # user_defined_symbols=[],
 	)
 
 def partitioning(model_file: str = 'politic4k-sp.model', file: str = 'politic4k.txt') -> None:

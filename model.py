@@ -1,38 +1,58 @@
 
+from dataclasses import dataclass
 import torch, math, sentencepiece, json
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
 
 
-def init_(tensor):
-	dim = tensor.shape[-1]
-	std = 1 / math.sqrt(dim)
-	tensor.uniform_(-std, std)
-	return tensor
-
 config = None
+
+
+@dataclass
+class ConfigMamba:
+	dim: int = 128
+	nlayers: int = 2
+	vocab_size: int = 0
+	d_state: int = 256
+	expand: int = 2
+	dt_rank: Union[int, str] = 'auto'
+	d_conv: int = 4 
+	pad_vocab_size_multiple: int = 8
+	conv_bias: bool = True
+	bias: bool = False
+
+conf_mamba = ConfigMamba()
 
 class Data:
 	def __init__(self, config: ClassVar) -> NoReturn:
-		data = torch.tensor([])
-		parts = 256 + 1
-		self.tokenizer = sentencepiece.SentencePieceProcessor(
-			model_file='data/shakespeare-sp.model')
-		self.encode = self.tokenizer.encode
-		self.decode = lambda seq: self.tokenizer.decode(seq)
-		self.vocab_size = self.tokenizer.vocab_size()
-		with open(f'data/shakespeare.txt') as fp:
-			encoded = self.encode(fp.read())
-			data = torch.tensor(encoded)
-		data = data.to(torch.long)
+		if config.token_type == 'token':
+			data = torch.tensor([])
+			self.tokenizer = sentencepiece.SentencePieceProcessor(
+				model_file='data/shakespeare-sp.model')
+			self.encode = self.tokenizer.encode
+			self.decode = lambda seq: self.tokenizer.decode(seq)
+			self.vocab_size = self.tokenizer.vocab_size()
+			with open(f'data/shakespeare.txt') as fp:
+				encoded = self.encode(fp.read())
+			data = torch.tensor(encoded, dtype=torch.long)
+		else:
+			with open(config.data_file) as fp:
+				text = fp.read()
+			self.chars = sorted(list(set(text)))
+			self.vocab_size = len(self.chars)
+			self.stoi = {c:i for i,c in enumerate(self.chars)}
+			self.itos = {i:c for c,i in self.stoi.items()}
+			self.encode = lambda s: [self.stoi[x] for x in s]
+			self.decode = lambda e: ''.join([self.itos[x] for x in e])
+			data = torch.tensor(self.encode(text), dtype=torch.long)
+
 		config.vocab_size = self.vocab_size
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
 		self.test_data = data[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
-
 
 	def __len__(self) -> int:
 		return self.vocab_size
@@ -66,6 +86,10 @@ class RMSNorm(nn.Module):
 	def _norm(self, x) -> Tensor:
 		return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
+	def _norm2(self, x) -> Tensor:
+		# transnormer
+		return (x / torch.norm(x, p=2)) / torch.sqrt(torch.tensor(x.size(-1))).to(x.device)
+
 	def forward(self, x) -> Tensor:
 		output = self._norm(x.float()).type_as(x)
 		return (output * self.weight)
@@ -83,13 +107,32 @@ class NonLinear(nn.Module):
 	def forward(self, x: Tensor) -> Tensor:
 		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
-class FNetBlock(nn.Module):
+
+class MambaBlock(nn.Module):
 	def __init__(self):
 		super().__init__()
+		# self.A = nn.Linear(conf_mamba.d_state, conf_mamba.d_state)
+		# self.B = nn.Linear(conf_mamba.dim, conf_mamba.d_state)
+		self.AB = nn.Linear(conf_mamba.dim + conf_mamba.d_state, conf_mamba.d_state)
+		self.C = nn.Linear(conf_mamba.d_state, conf_mamba.dim)
+		self.D = nn.Linear(conf_mamba.dim, conf_mamba.dim)
+		self.in_proj = nn.Linear(conf_mamba.dim, conf_mamba.dim)
+		self.out_proj = nn.Linear(conf_mamba.dim, conf_mamba.dim)
+		self.latent = torch.zeros((1, conf_mamba.d_state))
+		self.lnorm = RMSNorm(conf_mamba.d_state)
 
 	def forward(self, x):
-		x = torch.fft.fft(torch.fft.fft(x, dim=-1), dim=-2).real
-		return x
+		B, T, C = x.shape
+		x = self.in_proj(x)
+		latent = self.latent.expand(B, -1).to(x.device)
+		ys = []
+		for i in range(T):
+			latent = self.lnorm(self.AB(torch.cat((latent, x[:, i]), dim=1)))
+			# latent = self.lnorm(self.A(latent)) + self.B(x[:, i])
+			ys.append(self.C(latent))
+		ys = torch.stack(ys, dim=1) + self.D(x)
+		return self.out_proj(ys)
+
 
 class Block(nn.Module):
 	def __init__(self,
@@ -104,14 +147,17 @@ class Block(nn.Module):
 		self.ffn = NonLinear()
 		self.ln1 = RMSNorm(self.dim)
 		self.ln2 = RMSNorm(self.dim)
-		self.attn = FNetBlock()
+		self.attn = MambaBlock()
 
 	def forward(self,
 		x: Tensor,
 	) -> Tuple[Tensor, Union[Tensor, None]]:
-
+		if config.health > 0 and config.mode == 'train':
+			config.layers_health[self.idx]['pre_layer'] = x.norm(2).item()
 		x = x + self.attn(self.ln1(x))
 		x = x + self.ffn(self.ln2(x))
+		if config.health > 0 and config.mode == 'train':
+			config.layers_health[self.idx]['post_layer'] = x.norm(2).item()
 		return x
 
 
@@ -121,7 +167,7 @@ class Transformer(nn.Module):
 		self.dim = config.dim
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
-			pos_embs=nn.Embedding(config.block_size, self.dim),
+			# pos_embs=nn.Embedding(config.block_size, self.dim),
 			dropout=nn.Dropout(config.dropout),
 			ln1=RMSNorm(self.dim),
 			lm_head=nn.Linear(self.dim, config.vocab_size, bias=False),
@@ -131,7 +177,7 @@ class Transformer(nn.Module):
 		self.apply(self.norm_weights)
 		self.count_params = self.num_params() / 1e6
 		config.parameters = self.count_params
-		print("Number of parameters: %.2fM" % (self.count_params,))
+		print("Number of parameters: %.3fM" % (self.count_params,))
 
 
 	def num_params(self) -> int:
@@ -162,13 +208,11 @@ class Transformer(nn.Module):
 		seq: Tensor,
 		targets: Union[Tensor, None] = None,
 	) -> tuple[Tensor, Tensor]:
-
 		B, T = seq.shape
 		x = self.stack.tok_embs(seq)
-		arange = torch.arange(T, device=seq.device)
+		# arange = torch.arange(T, device=seq.device)
 
-		x = self.stack.dropout(x + self.stack.pos_embs(arange))
-
+		# x = self.stack.dropout(x + self.stack.pos_embs(arange))
 		for i, block in enumerate(self.blocks):
 			x = block(x)
 
@@ -194,9 +238,8 @@ class Transformer(nn.Module):
 		top_k: int = None,
 	) -> Tensor:
 		config.mode = 'inference'
-		bsize = config.block_size
 		for _ in range(_len):
-			idx_cond = idx if idx.size(1) <= bsize else idx[:, -bsize:]
+			idx_cond = idx if idx.size(1) <= config.block_size else idx[:, -config.block_size:]
 			logits, _ = self(idx_cond)
 			logits = logits / temperature
 			probs = F.softmax(logits, dim=-1)
