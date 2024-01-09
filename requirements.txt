@@ -6,3 +6,4 @@ wrapt
 datasets
 transformers
 sentencepiece
+einops

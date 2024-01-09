@@ -22,7 +22,7 @@ def set_seed(seed: int):
 set_seed(1244)
 
 block_size = 64
-dim = 128
+dim = 64
 params = {
 	'block_size': block_size,
 	'lr': 1e-3, # Learning rate
@@ -31,7 +31,7 @@ params = {
 	'beta2': 0.999, # The less, the more stable
 	'decay_lr': False,
 	'eval_step': 250, # Every n step, we do an evaluation.
-	'iterations': 251, # Like epochs
+	'iterations': 501, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
 	'batch_size': 64,
 	'nlayers': 2,
@@ -61,7 +61,7 @@ params = {
 	'bias': False,
 	'init_weight': 'normal_',
 	'topk': -1,
-	'token_type': 'char',
+	'token_type': 'token',
 	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
 	'layers_health': [],
 }
@@ -316,7 +316,7 @@ class ManageModel:
 				fused=use_fused,
 			)
 
-		ver = 'mamba'
+		ver = f'{config.variation}_{model.conf_mamba.ngroups}ng_mamba'
 
 		variation = f"{ver}_{config.nlayers}nl_\
 		{config.nheads}nh_{config.dim}d_{config.dropout}\
@@ -497,7 +497,7 @@ class ManageModel:
 
 			self.scaler.step(self.optimizer)
 			self.scaler.update()
-			self.net_health(epoch, lr, test_time)
+			# self.net_health(epoch, lr, test_time)
 			self.optimizer.zero_grad(set_to_none=True)
 
 			stop = time.time()
