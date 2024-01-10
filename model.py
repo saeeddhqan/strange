@@ -5,6 +5,7 @@ import torch, math, sentencepiece, json
 import torch.nn.functional as F
 from torch import nn, Tensor
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
+from pscan import pscan, pscan_faster
 
 
 config = None
@@ -12,8 +13,8 @@ config = None
 
 @dataclass
 class ConfigMamba:
-	dim: int = 384
-	nlayers: int = 2
+	dim: int = 256
+	nlayers: int = 6
 	vocab_size: int = 0
 	d_state: int = 16
 	expand: int = 2
@@ -23,7 +24,7 @@ class ConfigMamba:
 	pad_vocab_size_multiple: int = 8
 	conv_bias: bool = True
 	bias: bool = False
-	group: bool = False
+	group: bool = True
 	ngroups: int = 32
 
 	def __post_init__(self):
@@ -149,6 +150,7 @@ class MambaBlock(nn.Module):
 		else:
 			self.hot_loop = self.vanilla_block
 
+
 	def forward(self, x: Tensor, latent: Tensor) -> Tensor:
 		b, l, d = x.shape
 
@@ -171,7 +173,7 @@ class MambaBlock(nn.Module):
 		return self.out_proj(y), latent
 
 
-	def vanilla_block(self, u: Tensor, delta: Tensor,
+	def vanilla_block_seq(self, u: Tensor, delta: Tensor,
 		A: Tensor, B: Tensor, C: Tensor, D: Tensor,
 		latent: Tensor | None = None,
 	) -> Tensor:
@@ -193,7 +195,50 @@ class MambaBlock(nn.Module):
 
 		return y, None
 
+
+	def vanilla_block(self, u: Tensor, delta: Tensor,
+		A: Tensor, B: Tensor, C: Tensor, D: Tensor,
+		latent: Tensor | None = None,
+	) -> Tensor:
+		b, l, d_in = u.shape
+		n = A.shape[1]
+		
+		deltaA = torch.exp(einsum(delta, A, 'b l d_in, d_in n -> b l d_in n'))
+		deltaB_u = einsum(delta, B, u, 'b l d_in, b l n, b l d_in -> b l d_in n')
+
+		hs = pscan(deltaA, deltaB_u)
+		y = (hs @ C.unsqueeze(-1)).squeeze() # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+		y = y + u * D
+
+		return y, None
+
+
 	def group_block(self, u: Tensor, delta: Tensor,
+		A: Tensor, B: Tensor, C: Tensor, D: Tensor,
+		latent: Tensor | None = None,
+	) -> Tensor:
+		b, l, d_in = u.shape
+		n = A.shape[1]
+		pg = l // self.ng # tokens per group
+
+		A = torch.exp(einsum(delta, A, 'b l d_in, d_in n -> b l d_in n')) # delta A
+		B = einsum(delta, B, u, 'b l d_in, b l n, b l d_in -> b l d_in n') # delta B
+
+		latent = torch.zeros((b, self.ng, d_in, n), device=u.device) if self.idx == 0 else latent
+		A = A.view(b, self.ng, pg, d_in, n).contiguous()
+		B = B.view(b, self.ng, pg, d_in, n).contiguous()
+		C = C.view(b, self.ng, pg, -1).contiguous()
+
+		B = torch.cat(((B[:,:,0] + latent).unsqueeze(2), B[:,:,1:]), dim=2)
+		hs = pscan_faster(A, B)
+		y = (hs @ C.unsqueeze(-1)).squeeze().view(b, l, d_in) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+
+		y = y + u * D
+
+		return y, self.latent_communication(latent, pg)
+
+
+	def group_block_seq(self, u: Tensor, delta: Tensor,
 		A: Tensor, B: Tensor, C: Tensor, D: Tensor,
 		latent: Tensor | None = None,
 	) -> Tensor:
@@ -213,11 +258,10 @@ class MambaBlock(nn.Module):
 			latent = A[:, :, i] * latent + B[:, :, i]
 			y = einsum(latent, C[:, :, i], 'b g d_in n, b g n -> b g d_in')
 			ys.append(y)
-
 		ys = torch.stack(ys, dim=2).view(b, l, d_in).contiguous()
-
 		ys = ys + u * D
 		return ys, self.latent_communication(latent, pg)
+
 
 	def latent_communication(self, latent: Tensor, pg: int):
 		b = latent.size(0)
@@ -246,7 +290,6 @@ class Block(nn.Module):
 		idx: int,
 	):
 		super().__init__()
-		assert config.dim % config.nheads == 0, 'embeds size is not divisible to the nheads'
 		self.idx = idx
 		self.dim = config.dim
 		self.ln1 = RMSNorm(self.dim)

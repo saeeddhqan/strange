@@ -21,8 +21,8 @@ def set_seed(seed: int):
 
 set_seed(1244)
 
-block_size = 64
-dim = 64
+block_size = 612
+dim = 256
 params = {
 	'block_size': block_size,
 	'lr': 1e-3, # Learning rate
@@ -33,9 +33,8 @@ params = {
 	'eval_step': 250, # Every n step, we do an evaluation.
 	'iterations': 501, # Like epochs
 	'eval_iterations': 200, # Do n step(s), and calculate loss.
-	'batch_size': 64,
-	'nlayers': 2,
-	'nheads': 4,
+	'batch_size': 32,
+	'nlayers': 6,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'dim': dim,
@@ -319,7 +318,7 @@ class ManageModel:
 		ver = f'{config.variation}_{model.conf_mamba.ngroups}ng_mamba'
 
 		variation = f"{ver}_{config.nlayers}nl_\
-		{config.nheads}nh_{config.dim}d_{config.dropout}\
+		{config.dim}d_{config.dropout}\
 		do_{config.block_size}bs_{config.lr}lr_{int(config.decay_lr)}\
 		dlr".strip().replace('\t', '').replace(' ', '')
 
@@ -588,7 +587,6 @@ if __name__ == '__main__':
 	parser.add_argument('--min-lr', '-ml', type=float, default=config.min_lr, help=f"minimum learning rate, default {config.min_lr}")
 	parser.add_argument('--dropout', '-do', type=float, default=config.dropout, help=f"dropout prob, default {config.dropout}")
 	parser.add_argument('--nlayers', '-nl', type=int, default=config.nlayers, help=f"number of blocks, default {config.nlayers}")
-	parser.add_argument('--nheads', '-nh', type=int, default=config.nheads, help=f"number of heads, default {config.nheads}")
 	parser.add_argument('--dim', '-d', type=int, default=config.dim, help=f"embedding size, default {config.dim}")
 	parser.add_argument('--accumulation-steps', '-as', type=int, default=config.accumulation_steps, help=f"accumulation steps, default {config.accumulation_steps}")
 	parser.add_argument('--block-size', '-bs', type=int, default=config.block_size, help=f"length input sequence, default {config.block_size}")
