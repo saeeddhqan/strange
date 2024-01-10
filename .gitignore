@@ -9,6 +9,7 @@ runs
 data.py
 workdir
 fused_loop
+ssm
 # C extensions
 *.so
 

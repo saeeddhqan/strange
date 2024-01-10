@@ -8,11 +8,11 @@ from typing import NoReturn, ClassVar, Union, Optional, Tuple
 
 
 config = None
-	
+
 
 @dataclass
 class ConfigMamba:
-	dim: int = 64
+	dim: int = 384
 	nlayers: int = 2
 	vocab_size: int = 0
 	d_state: int = 16
@@ -23,7 +23,7 @@ class ConfigMamba:
 	pad_vocab_size_multiple: int = 8
 	conv_bias: bool = True
 	bias: bool = False
-	group: bool = True
+	group: bool = False
 	ngroups: int = 32
 
 	def __post_init__(self):
@@ -145,12 +145,15 @@ class MambaBlock(nn.Module):
 			self.scale = 1.0 / math.sqrt(self.d_state * self.d_in)
 			self.c_attn = nn.Linear(self.d_state, 3 * self.d_state, bias=config.bias)
 			# self.c_proj = nn.Linear(self.d_state, self.d_state, bias=config.bias)
+			# self.ln1 = RMSNorm(self.d_state)
 		else:
 			self.hot_loop = self.vanilla_block
 
 	def forward(self, x: Tensor, latent: Tensor) -> Tensor:
 		b, l, d = x.shape
+
 		x_res = self.in_proj(x)
+
 		x, res = x_res.split(split_size=[self.d_in, self.d_in], dim=-1)
 		x = self.conv1d(x.mT)[:, :, :l]
 		x = F.silu(x.mT)
@@ -223,16 +226,16 @@ class MambaBlock(nn.Module):
 		xk = xk.contiguous().view(b, self.ng - 1, -1)
 		xv = xv.contiguous().view(b, self.ng - 1, -1)
 		# simple, but group quad
-		# x = F.scaled_dot_product_attention(xq, xk, xv, 
-		# 	attn_mask=None,
-		# 	# dropout_p=config.dropout if (self.training) else 0,
-		# 	is_causal=True)
+		latent = F.scaled_dot_product_attention(xq, xk, xv, 
+			attn_mask=None,
+			# dropout_p=config.dropout if (self.training) else 0,
+			is_causal=True)
 		# Sequential attention
-		latent = torch.tensor([]).to(config.device)
-		for i in range(self.ng - 1):
-			scores = (xq[:, i:i + 1] * xk[:, :i + 1]).sum(dim=-1).unsqueeze(-1).mT * self.scale
-			scores = F.softmax(scores, dim=-1)
-			latent = torch.cat((latent, scores @ xv[:,:i + 1]), dim=1)
+		# latent = torch.tensor([]).to(config.device)
+		# for i in range(self.ng - 1):
+		# 	scores = (xq[:, i:i + 1] * xk[:, :i + 1]).sum(dim=-1).unsqueeze(-1).mT * self.scale
+		# 	scores = F.softmax(scores, dim=-1)
+		# 	latent = torch.cat((latent, scores @ xv[:,:i + 1]), dim=1)
 		latent = latent.view(b, self.ng - 1, self.d_in, self.d_state) # c_proj?
 
 		return torch.cat((torch.zeros((b, 1, self.d_in, self.d_state), device=xq.device), latent), dim=1)
